@@ -1,6 +1,5 @@
 """
 FabriFlow ERP — Management Interface
-Password-protected. Deployed as a separate Streamlit app.
 """
 import sys
 from pathlib import Path
@@ -13,20 +12,18 @@ import importlib
 
 st.set_page_config(page_title="FabriFlow ERP — Management", page_icon="🏭", layout="wide", initial_sidebar_state="expanded")
 
-# ─── Auth Gate ────────────────────────────────────────────────────
 from auth import check_auth, logout
 if not check_auth("management"):
     st.stop()
 
-# ─── CSS ──────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&display=swap');
 html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; color: #1e293b; }
 [data-testid="stSidebar"] { background: #f8fafc; border-right: 1px solid #e2e8f0; }
 [data-testid="stSidebar"] .stMarkdown p, [data-testid="stSidebar"] label,
-[data-testid="stSidebar"] .stSelectbox label, [data-testid="stSidebar"] .stRadio label
-{ color: #334155 !important; }
+[data-testid="stSidebar"] .stRadio label { color: #334155 !important; }
+[data-testid="stSidebar"] [data-baseweb="radio"] label { font-size: 0.95rem !important; padding: 2px 0 !important; }
 h1 { color: #0f172a !important; font-weight: 700 !important; }
 h2 { color: #1e293b !important; font-weight: 600 !important; }
 h3 { color: #334155 !important; font-weight: 600 !important; }
@@ -41,7 +38,6 @@ hr { border-color: #e2e8f0 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Sidebar ──────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("""
     <div style="text-align:center;padding:16px 0 8px 0">
@@ -51,21 +47,25 @@ with st.sidebar:
     </div><hr style="border-color:#e2e8f0;margin:8px 0 16px 0">
     """, unsafe_allow_html=True)
 
-    page = st.selectbox("Navigate", [
-        "📊 Dashboard",
-        "📦 Master Items",
-        "📋 Projects & BOQ",
-        "🚀 Order Staging",
-        "👥 Vendors",
-        "🔧 Service Vendors",
-        "📦 Purchase Orders",
-        "🛠️ Service POs",
-        "🏗️ Production Tracking",
-        "📦 Inventory",
-        "✅ Finished Goods",
-        "🚚 Dispatch",
-        "📤 Bulk Upload",
-    ])
+    page = st.radio(
+        "Navigation",
+        [
+            "📊 Dashboard",
+            "📦 Master Items",
+            "📋 Projects & BOQ",
+            "🚀 Order Staging",
+            "👥 Vendors",
+            "🔧 Service Vendors",
+            "📦 Purchase Orders",
+            "🛠️ Service POs",
+            "🏗️ Production Tracking",
+            "📦 Inventory",
+            "✅ Finished Goods",
+            "🚚 Dispatch",
+            "📤 Bulk Upload",
+        ],
+        label_visibility="collapsed",
+    )
 
     st.markdown("<hr style='border-color:#e2e8f0;margin:16px 0'>", unsafe_allow_html=True)
     if st.button("🔓 Logout", use_container_width=True):

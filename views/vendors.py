@@ -1,19 +1,18 @@
-"""Vendors Management Page - Material suppliers."""
+"""Vendors Management Page — linked to master items catalog."""
 import streamlit as st
 import pandas as pd
-from utils.db import add_vendor, get_all_vendors, get_vendor, add_vendor_item, get_vendor_items
+from utils.db import add_vendor, get_all_vendors, get_all_master_items
 from utils.ui_helpers import section_header, empty_state, format_currency
-from config import PAYMENT_TERMS, MATERIAL_CATEGORIES, UNITS_OF_MEASURE
+from config import PAYMENT_TERMS
 
 
 def render():
     st.markdown("# 👥 Material Vendors")
-    st.markdown("*Manage your material suppliers, their items and pricing*")
+    st.markdown("*Manage your material suppliers — items are linked via the Master Items catalog*")
     st.markdown("---")
 
     tab1, tab2 = st.tabs(["📋 All Vendors", "➕ Add Vendor"])
 
-    # ─── Add Vendor ───────────────────────────────────────────────
     with tab2:
         section_header("Register New Vendor", "➕")
         with st.form("add_vendor_form", clear_on_submit=True):
@@ -36,17 +35,20 @@ def render():
                 else:
                     st.error("Company Name, Contact Person, and Phone are required.")
 
-    # ─── All Vendors ──────────────────────────────────────────────
     with tab1:
         vendors = get_all_vendors()
         if not vendors:
             empty_state("👥", "No vendors registered", "Add your first vendor in the 'Add Vendor' tab")
             return
 
+        master_items = get_all_master_items()
         st.markdown(f"**{len(vendors)} vendor(s) registered**")
 
         for vendor in sorted(vendors, key=lambda x: x.get("name", "")):
-            with st.expander(f"🏢 **{vendor['name']}** — {vendor.get('contact_person', '')} ({vendor.get('vendor_id', '')})"):
+            # Find master items linked to this vendor
+            vendor_items = [m for m in master_items if m.get("vendor", "").lower() == vendor["name"].lower()]
+
+            with st.expander(f"🏢 **{vendor['name']}** — {vendor.get('contact_person', '')} | {len(vendor_items)} items ({vendor.get('vendor_id', '')})"):
                 vc1, vc2 = st.columns(2)
                 with vc1:
                     st.markdown(f"**Phone:** {vendor.get('phone', 'N/A')}")
@@ -57,37 +59,15 @@ def render():
                     st.markdown(f"**Payment Terms:** {vendor.get('payment_terms', 'N/A')}")
 
                 st.markdown("---")
-                st.markdown("#### 📦 Items Stocked")
+                st.markdown("#### 📦 Items from Master Catalog")
 
-                items = get_vendor_items(vendor["vendor_id"])
-                if items:
-                    df = pd.DataFrame(items)
-                    cols = ["item_name", "category", "specification", "unit", "current_price"]
+                if vendor_items:
+                    df = pd.DataFrame(vendor_items)
+                    cols = ["item_id", "item_name", "category", "sub_category", "specification", "unit", "price", "revised_price"]
                     available = [c for c in cols if c in df.columns]
                     if available:
                         display_df = df[available].copy()
                         display_df.columns = [c.replace("_", " ").title() for c in available]
                         st.dataframe(display_df, use_container_width=True, hide_index=True)
                 else:
-                    st.caption("No items listed yet")
-
-                # Add item to vendor
-                st.markdown("##### ➕ Add Item")
-                with st.form(f"vendor_item_{vendor['vendor_id']}", clear_on_submit=True):
-                    ic1, ic2, ic3 = st.columns(3)
-                    with ic1:
-                        item_name = st.text_input("Item Name *", key=f"vi_name_{vendor['vendor_id']}")
-                        category = st.selectbox("Category", list(MATERIAL_CATEGORIES.keys()), key=f"vi_cat_{vendor['vendor_id']}")
-                    with ic2:
-                        specification = st.text_input("Specification", key=f"vi_spec_{vendor['vendor_id']}")
-                        unit = st.selectbox("Unit", UNITS_OF_MEASURE, key=f"vi_unit_{vendor['vendor_id']}")
-                    with ic3:
-                        current_price = st.number_input("Current Price (₹)", min_value=0.0, step=0.5, key=f"vi_price_{vendor['vendor_id']}")
-
-                    if st.form_submit_button("Add Item"):
-                        if item_name:
-                            add_vendor_item(vendor["vendor_id"], item_name, category, specification, unit, current_price)
-                            st.success(f"Added **{item_name}**")
-                            st.rerun()
-                        else:
-                            st.error("Item Name is required.")
+                    st.caption("No items in master catalog for this vendor. Add items in 📦 Master Items page with this vendor name.")
