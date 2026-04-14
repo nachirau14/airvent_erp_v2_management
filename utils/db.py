@@ -74,160 +74,60 @@ def _scan_all(table_name):
 #  S3 — PDF Generation & Attachments
 # ═══════════════════════════════════════════════════════════════════
 def generate_po_pdf(po_data, po_items, po_type="Material"):
-    """Generate a professional PDF for a PO and upload to S3. Returns the S3 key."""
+    """Generate a simple PDF for a PO and upload to S3. Returns the S3 key."""
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.units import mm
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.styles import getSampleStyleSheet
         from reportlab.lib import colors
-        from reportlab.lib.enums import TA_CENTER
     except ImportError:
         return None
 
-    # --- Company Configuration (Update these to match your actual ERP settings) ---
-    COMPANY_NAME = "AIRVENT PRIVATE LIMITED"
-    COMPANY_ADDRESS = "Plot no 460, IV Phase, Peenya Industrial Area, Bangalore,<br/>Bengaluru Urban, Karnataka<br/>India-560058"
-    COMPANY_GSTIN = "29AABCA2154P1ZF"
-    # ------------------------------------------------------------------------------
-
     buf = io.BytesIO()
-    # Adjusted margins to maximize usable space for the table
-    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=12*mm, leftMargin=12*mm, topMargin=15*mm, bottomMargin=15*mm)
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20*mm, bottomMargin=20*mm)
     styles = getSampleStyleSheet()
-
-    # Custom ReportLab Styles for better text control
-    title_style = ParagraphStyle(name='TitleStyle', parent=styles['Heading1'], alignment=TA_CENTER, fontSize=16, fontName='Helvetica-Bold', spaceAfter=10)
-    bold_style = ParagraphStyle(name='BoldStyle', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9, leading=12)
-    normal_style = ParagraphStyle(name='NormStyle', parent=styles['Normal'], fontSize=8, leading=10)
-
     elements = []
 
-    # 1. Document Title
-    elements.append(Paragraph("<b>PURCHASE ORDER</b>", title_style))
+    # Header
+    elements.append(Paragraph(f"<b>PURCHASE ORDER</b>", styles["Title"]))
     elements.append(Spacer(1, 5*mm))
-
-    # 2. Header Info Grids (Buyer, Supplier, Shipping, PO Details)
     po_id = po_data.get("po_id", "")
-    vendor_name = po_data.get("vendor_name", "Unknown Vendor")
-    
-    # We use Paragraphs here so we can utilize HTML-like tags for multi-line formatting
-    buyer_html = f"<b>Name and Address of Buyer</b><br/><br/><b>{COMPANY_NAME}</b><br/>{COMPANY_ADDRESS}<br/><b>GSTIN:</b> {COMPANY_GSTIN}"
-    po_info_html = f"<b>PO Number:</b> {po_id}<br/><br/><b>PO Date:</b> {_today()}<br/><b>Delivery Date:</b> {po_data.get('expected_delivery', '')}<br/><b>Payment Terms:</b> {po_data.get('payment_terms', 'NET 30')}"
-    
-    # In a full production app, vendor address/GSTIN should be pulled dynamically from po_data
-    supplier_html = f"<b>Name and Address of Supplier</b><br/><br/><b>{vendor_name}</b><br/>Vendor Address and Contact Info<br/><b>GSTIN:</b> Unregistered / NA"
-    shipping_html = f"<b>Shipping Details</b><br/><br/><b>Main</b><br/>{COMPANY_ADDRESS}<br/><b>GSTIN:</b> {COMPANY_GSTIN}"
+    elements.append(Paragraph(f"<b>PO Number:</b> {po_id}", styles["Normal"]))
+    elements.append(Paragraph(f"<b>Type:</b> {po_type}", styles["Normal"]))
+    elements.append(Paragraph(f"<b>Vendor:</b> {po_data.get('vendor_name', '')}", styles["Normal"]))
+    elements.append(Paragraph(f"<b>Payment Terms:</b> {po_data.get('payment_terms', '')}", styles["Normal"]))
+    elements.append(Paragraph(f"<b>Expected Delivery:</b> {po_data.get('expected_delivery', '')}", styles["Normal"]))
+    elements.append(Paragraph(f"<b>Date:</b> {_today()}", styles["Normal"]))
+    elements.append(Spacer(1, 8*mm))
 
-    # Grouping into a 2x2 Table
-    header_data = [
-        [Paragraph(buyer_html, normal_style), Paragraph(po_info_html, normal_style)],
-        [Paragraph(supplier_html, normal_style), Paragraph(shipping_html, normal_style)]
-    ]
-
-    header_table = Table(header_data, colWidths=[100*mm, 86*mm])
-    header_table.setStyle(TableStyle([
-        ('VALIGN', (0,0), (-1,-1), 'TOP'),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-        ('PADDING', (0,0), (-1,-1), 6),
-    ]))
-    elements.append(header_table)
-    elements.append(Spacer(1, 5*mm))
-
-    # 3. Line Items Table
-    # Added dedicated columns for taxes to mimic the professional GST format
-    item_headers = ["Sl No", "Description & Specifications", "Qty", "Rate (₹)", "Taxable Amt", "Tax (18%)", "Total (₹)"]
-    item_data = [item_headers]
-
-    total_taxable = 0
-    total_tax = 0
-
+    # Items table
+    data = [["#", "Description", "Specification", "Qty", "Unit", "Rate (₹)", "Amount (₹)"]]
     for idx, item in enumerate(po_items, 1):
-        # Allow multi-line descriptions and specifications in a single cell
-        desc_text = f"<b>{item.get('description', '')}</b>"
-        if item.get("specification"):
-            desc_text += f"<br/><i>Details:</i> {item.get('specification', '')}"
+        qty = item.get("quantity", 0)
+        rate = item.get("unit_price", item.get("rate", 0))
+        data.append([str(idx), item.get("description", ""), item.get("specification", ""),
+                      str(qty), item.get("unit", ""), f"{rate:,.2f}", f"{qty * rate:,.2f}"])
 
-        qty = float(item.get("quantity", 0))
-        rate = float(item.get("unit_price", item.get("rate", 0)))
-        unit = item.get("unit", "Nos")
+    total = sum(i.get("quantity", 0) * i.get("unit_price", i.get("rate", 0)) for i in po_items)
+    data.append(["", "", "", "", "", "Total", f"{total:,.2f}"])
 
-        # Computations
-        taxable_amt = qty * rate
-        # Placeholder standard 18% tax logic; adjust to pull from DB if you track dynamic tax slabs
-        tax_amt = taxable_amt * 0.18 
-        row_total = taxable_amt + tax_amt
-
-        total_taxable += taxable_amt
-        total_tax += tax_amt
-
-        item_data.append([
-            str(idx),
-            Paragraph(desc_text, normal_style),
-            f"{qty:.2f} {unit}",
-            f"{rate:,.2f}",
-            f"{taxable_amt:,.2f}",
-            f"{tax_amt:,.2f}",
-            f"{row_total:,.2f}"
-        ])
-
-    grand_total = total_taxable + total_tax
-
-    # Add Calculation Totals Rows at the bottom of the table
-    item_data.append([
-        "", Paragraph("<b>Total (before Tax):</b>", bold_style),
-        "", "", "", "", f"{total_taxable:,.2f}"
-    ])
-    item_data.append([
-        "", Paragraph("<b>Total Tax (IGST/CGST/SGST):</b>", bold_style),
-        "", "", "", "", f"{total_tax:,.2f}"
-    ])
-    item_data.append([
-        "", Paragraph("<b>Grand Total:</b>", bold_style),
-        "", "", "", "", f"₹ {grand_total:,.2f}"
-    ])
-
-    # Table Width Mapping
-    t = Table(item_data, colWidths=[12*mm, 60*mm, 20*mm, 20*mm, 24*mm, 24*mm, 26*mm])
+    t = Table(data, repeatRows=1)
     t.setStyle(TableStyle([
-        # Header Styling
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f4f4f5")),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-
-        # Number Column Alignments
-        ('ALIGN', (2, 1), (-1, -1), 'RIGHT'),
-
-        # Span and align the Totals label cells horizontally
-        ('SPAN', (1, -3), (5, -3)),
-        ('SPAN', (1, -2), (5, -2)),
-        ('SPAN', (1, -1), (5, -1)),
-        ('ALIGN', (1, -3), (1, -1), 'RIGHT'),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e40af")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#f1f5f9")),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
     ]))
     elements.append(t)
-    elements.append(Spacer(1, 5*mm))
+    elements.append(Spacer(1, 10*mm))
+    if po_data.get("notes"):
+        elements.append(Paragraph(f"<b>Notes:</b> {po_data['notes']}", styles["Normal"]))
 
-    # 4. Footer Section
-    notes = po_data.get("notes", "N/A")
-    footer_left = f"<b>Terms And Conditions:</b><br/>1. {notes}<br/>2. This is a computer generated document."
-    footer_right = f"<b>For {COMPANY_NAME}</b><br/><br/><br/><br/>Authorised Signatory"
-
-    footer_data = [
-        [Paragraph(footer_left, normal_style), Paragraph(footer_right, bold_style)]
-    ]
-    footer_table = Table(footer_data, colWidths=[120*mm, 66*mm])
-    footer_table.setStyle(TableStyle([
-        ('VALIGN', (0,0), (-1,-1), 'TOP'),
-        ('ALIGN', (1,0), (1,0), 'RIGHT'),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-        ('PADDING', (0,0), (-1,-1), 6),
-    ]))
-    elements.append(footer_table)
-
-    # Build and Save
     doc.build(elements)
     buf.seek(0)
 
@@ -235,11 +135,13 @@ def generate_po_pdf(po_data, po_items, po_type="Material"):
     s3_key = f"po/{po_type.lower()}/{_today()}/{po_id}.pdf"
     try:
         s3 = get_s3_client()
-        s3.put_object(Bucket=S3_PO_PDF_BUCKET, Key=s3_key, Body=buf.getvalue(), ContentType="application/pdf")
+        s3.put_object(Bucket=S3_PO_PDF_BUCKET, Key=s3_key, Body=buf.getvalue(),
+                       ContentType="application/pdf")
         return s3_key
     except Exception as e:
         st.warning(f"S3 upload failed: {e}")
         return None
+
 
 def get_po_pdf_download(s3_key):
     """Download PDF bytes from S3 for display."""
@@ -282,6 +184,231 @@ def list_attachments(po_id):
         return [obj["Key"] for obj in resp.get("Contents", [])]
     except Exception:
         return []
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  EMAIL — SES Configuration & Sending
+# ═══════════════════════════════════════════════════════════════════
+EMAIL_CONFIG_TABLE = "erp_email_config"
+
+@st.cache_resource
+def get_ses_client():
+    return boto3.client("ses", **_get_aws_config())
+
+
+def get_email_config():
+    """Get email config from DynamoDB. Returns dict or defaults."""
+    try:
+        db = get_dynamodb()
+        table = db.Table(EMAIL_CONFIG_TABLE)
+        resp = table.get_item(Key={"config_id": "main"})
+        item = resp.get("Item")
+        if item:
+            return _from_decimal(item)
+    except Exception:
+        pass
+    return {
+        "config_id": "main",
+        "sender_email": st.secrets.get("aws", {}).get("SES_SENDER_EMAIL", "erp@yourdomain.com"),
+        "management_emails": [],
+        "reminder_enabled": True,
+        "digest_enabled": True,
+        "company_name": "FabriFlow",
+    }
+
+
+def save_email_config(config):
+    """Save email config to DynamoDB."""
+    try:
+        db = get_dynamodb()
+        table = db.Table(EMAIL_CONFIG_TABLE)
+        config["config_id"] = "main"
+        config["updated_at"] = _now()
+        table.put_item(Item=config)
+        return True
+    except Exception as e:
+        st.error(f"Failed to save config: {e}")
+        return False
+
+
+def send_email(to_addresses, subject, html_body, sender_email=None):
+    """Send an email via SES. Returns True on success."""
+    if not sender_email:
+        cfg = get_email_config()
+        sender_email = cfg.get("sender_email", "erp@yourdomain.com")
+    if isinstance(to_addresses, str):
+        to_addresses = [to_addresses]
+    try:
+        ses = get_ses_client()
+        ses.send_email(
+            Source=sender_email,
+            Destination={"ToAddresses": to_addresses},
+            Message={
+                "Subject": {"Data": subject, "Charset": "UTF-8"},
+                "Body": {"Html": {"Data": html_body, "Charset": "UTF-8"}},
+            },
+        )
+        return True
+    except Exception as e:
+        return str(e)
+
+
+def send_test_email(to_address, sender_email=None):
+    """Send a test email."""
+    html = """
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden">
+        <div style="background:#1e40af;color:white;padding:20px;text-align:center">
+            <h2 style="margin:0">🏭 FabriFlow ERP — Test Email</h2>
+        </div>
+        <div style="padding:24px">
+            <p>This is a <strong>test email</strong> from your FabriFlow ERP system.</p>
+            <p>If you received this, your SES email configuration is working correctly.</p>
+            <hr style="border-color:#e2e8f0">
+            <p style="color:#64748b;font-size:0.85rem">Sent at: {time}</p>
+        </div>
+    </div>
+    """.format(time=_now())
+    return send_email(to_address, "FabriFlow ERP — Test Email", html, sender_email)
+
+
+def send_po_email(po_data, po_items, vendor_email, po_type="Material"):
+    """Send PO notification email to vendor."""
+    cfg = get_email_config()
+    sender = cfg.get("sender_email", "erp@yourdomain.com")
+    company = cfg.get("company_name", "FabriFlow")
+    po_id = po_data.get("po_id", "")
+
+    rows = ""
+    for i, item in enumerate(po_items, 1):
+        qty = item.get("quantity", 0)
+        rate = item.get("unit_price", item.get("rate", 0))
+        rows += f"""<tr>
+            <td style="padding:8px;border:1px solid #e2e8f0">{i}</td>
+            <td style="padding:8px;border:1px solid #e2e8f0">{item.get('description', '')}</td>
+            <td style="padding:8px;border:1px solid #e2e8f0">{item.get('specification', '')}</td>
+            <td style="padding:8px;border:1px solid #e2e8f0;text-align:right">{qty} {item.get('unit', '')}</td>
+            <td style="padding:8px;border:1px solid #e2e8f0;text-align:right">₹{rate:,.2f}</td>
+            <td style="padding:8px;border:1px solid #e2e8f0;text-align:right">₹{qty * rate:,.2f}</td>
+        </tr>"""
+
+    total = sum(i.get("quantity", 0) * i.get("unit_price", i.get("rate", 0)) for i in po_items)
+
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:700px;margin:auto;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden">
+        <div style="background:#1e40af;color:white;padding:20px">
+            <h2 style="margin:0">{po_type} Purchase Order: {po_id}</h2>
+            <p style="margin:4px 0 0 0;opacity:0.9">From {company}</p>
+        </div>
+        <div style="padding:24px">
+            <p>Dear <strong>{po_data.get('vendor_name', '')}</strong>,</p>
+            <p>Please find below the purchase order details:</p>
+            <table style="width:100%;border-collapse:collapse;margin:16px 0">
+                <tr style="background:#f1f5f9">
+                    <th style="padding:8px;border:1px solid #e2e8f0">#</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0">Description</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0">Specification</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0">Qty</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0">Rate</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0">Amount</th>
+                </tr>
+                {rows}
+                <tr style="background:#f1f5f9;font-weight:bold">
+                    <td colspan="5" style="padding:8px;border:1px solid #e2e8f0;text-align:right">Total</td>
+                    <td style="padding:8px;border:1px solid #e2e8f0;text-align:right">₹{total:,.2f}</td>
+                </tr>
+            </table>
+            <p><strong>Payment Terms:</strong> {po_data.get('payment_terms', '')}</p>
+            <p><strong>Expected Delivery:</strong> {po_data.get('expected_delivery', '')}</p>
+            {f"<p><strong>Notes:</strong> {po_data.get('notes', '')}</p>" if po_data.get('notes') else ''}
+            <p>Please acknowledge receipt of this PO.</p>
+            <hr style="border-color:#e2e8f0">
+            <p style="color:#64748b;font-size:0.8rem">This is an automated email from {company} ERP.</p>
+        </div>
+    </div>"""
+
+    return send_email(vendor_email, f"{po_type} PO: {po_id} — {company}", html, sender)
+
+
+def send_reminder_email(po_data, vendor_email, management_emails, po_type="Material"):
+    """Send delivery reminder to vendor and/or management."""
+    cfg = get_email_config()
+    sender = cfg.get("sender_email", "")
+    company = cfg.get("company_name", "FabriFlow")
+    po_id = po_data.get("po_id", "")
+
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;border:1px solid #fbbf24;border-radius:8px;overflow:hidden">
+        <div style="background:#d97706;color:white;padding:20px">
+            <h2 style="margin:0">⚠️ Delivery Reminder — {po_id}</h2>
+        </div>
+        <div style="padding:24px">
+            <p>This is a reminder that the following {po_type} PO is <strong>due for delivery tomorrow</strong>:</p>
+            <table style="margin:16px 0">
+                <tr><td style="padding:4px 12px;font-weight:bold">PO Number:</td><td>{po_id}</td></tr>
+                <tr><td style="padding:4px 12px;font-weight:bold">Vendor:</td><td>{po_data.get('vendor_name', '')}</td></tr>
+                <tr><td style="padding:4px 12px;font-weight:bold">Expected Delivery:</td><td>{po_data.get('expected_delivery', '')}</td></tr>
+                <tr><td style="padding:4px 12px;font-weight:bold">Amount:</td><td>₹{po_data.get('total_amount', 0):,.2f}</td></tr>
+            </table>
+            <p>Please ensure timely delivery.</p>
+            <p style="color:#64748b;font-size:0.8rem">— {company} ERP</p>
+        </div>
+    </div>"""
+
+    results = []
+    if vendor_email:
+        results.append(("Vendor", send_email(vendor_email, f"Delivery Reminder: {po_id}", html, sender)))
+    for mgmt in (management_emails or []):
+        if mgmt:
+            results.append(("Management", send_email(mgmt, f"Delivery Reminder: {po_id}", html, sender)))
+    return results
+
+
+def send_weekly_digest(pos_received, management_emails):
+    """Send weekly digest of received POs."""
+    cfg = get_email_config()
+    sender = cfg.get("sender_email", "")
+    company = cfg.get("company_name", "FabriFlow")
+
+    rows = ""
+    total_value = 0
+    for po in pos_received:
+        amt = po.get("total_amount", 0)
+        total_value += amt
+        rows += f"""<tr>
+            <td style="padding:8px;border:1px solid #e2e8f0">{po.get('po_id', '')}</td>
+            <td style="padding:8px;border:1px solid #e2e8f0">{po.get('vendor_name', '')}</td>
+            <td style="padding:8px;border:1px solid #e2e8f0">{po.get('status', '')}</td>
+            <td style="padding:8px;border:1px solid #e2e8f0;text-align:right">₹{amt:,.2f}</td>
+            <td style="padding:8px;border:1px solid #e2e8f0">{po.get('expected_delivery', '')}</td>
+        </tr>"""
+
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:700px;margin:auto;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden">
+        <div style="background:#16a34a;color:white;padding:20px">
+            <h2 style="margin:0">📊 Weekly PO Digest — {company}</h2>
+            <p style="margin:4px 0 0 0;opacity:0.9">Week ending {_today()}</p>
+        </div>
+        <div style="padding:24px">
+            <p><strong>{len(pos_received)}</strong> POs received/completed this week, totaling <strong>₹{total_value:,.2f}</strong></p>
+            <table style="width:100%;border-collapse:collapse;margin:16px 0">
+                <tr style="background:#f1f5f9">
+                    <th style="padding:8px;border:1px solid #e2e8f0">PO #</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0">Vendor</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0">Status</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0">Amount</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0">Delivery</th>
+                </tr>
+                {rows if rows else '<tr><td colspan="5" style="padding:16px;text-align:center;color:#94a3b8">No POs received this week</td></tr>'}
+            </table>
+            <p style="color:#64748b;font-size:0.8rem">— {company} ERP automated digest</p>
+        </div>
+    </div>"""
+
+    results = []
+    for mgmt in (management_emails or []):
+        if mgmt:
+            results.append(send_email(mgmt, f"Weekly PO Digest — {company} — {_today()}", html, sender))
+    return results
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -63,6 +63,7 @@ with st.sidebar:
             "✅ Finished Goods",
             "🚚 Dispatch",
             "📤 Bulk Upload",
+            "📧 Email Setup",
         ],
         label_visibility="collapsed",
     )
@@ -85,6 +86,7 @@ PAGE_MAP = {
     "✅ Finished Goods": "views.finished_goods",
     "🚚 Dispatch": "views.dispatch",
     "📤 Bulk Upload": "views.bulk_upload",
+    "📧 Email Setup": "views.email_setup",
 }
 mod = importlib.import_module(PAGE_MAP[page])
 mod.render()
