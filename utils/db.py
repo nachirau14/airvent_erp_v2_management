@@ -47,6 +47,53 @@ def _now():
 def _today():
     return datetime.utcnow().strftime("%Y-%m-%d")
 
+def _financial_year_prefix():
+    """Return financial year prefix like FY2526 for Apr 2025 - Mar 2026."""
+    now = datetime.utcnow()
+    fy_start = now.year if now.month >= 4 else now.year - 1
+    fy_end = fy_start + 1
+    return f"{str(fy_start)[2:]}{str(fy_end)[2:]}"
+
+COUNTER_TABLE = "erp_counters"
+
+def _next_sequential_id(prefix, counter_name=None):
+    """Get next sequential ID like MI-0001, RMPO-FY2526-0001.
+    Uses an atomic counter in DynamoDB for concurrency safety."""
+    if counter_name is None:
+        counter_name = prefix.rstrip("-")
+    db = get_dynamodb()
+    table = db.Table(COUNTER_TABLE)
+    try:
+        resp = table.update_item(
+            Key={"counter_name": counter_name},
+            UpdateExpression="SET counter_value = if_not_exists(counter_value, :zero) + :inc",
+            ExpressionAttributeValues={":inc": 1, ":zero": 0},
+            ReturnValues="UPDATED_NEW",
+        )
+        seq = int(resp["Attributes"]["counter_value"])
+    except Exception:
+        # Fallback if counter table doesn't exist
+        return _gen_id(prefix)
+    return f"{prefix}{seq:04d}"
+
+def _next_po_id(prefix):
+    """Sequential PO ID per financial year: RMPO-FY2526-0001."""
+    fy = _financial_year_prefix()
+    counter_name = f"{prefix.rstrip('-')}-FY{fy}"
+    db = get_dynamodb()
+    table = db.Table(COUNTER_TABLE)
+    try:
+        resp = table.update_item(
+            Key={"counter_name": counter_name},
+            UpdateExpression="SET counter_value = if_not_exists(counter_value, :zero) + :inc",
+            ExpressionAttributeValues={":inc": 1, ":zero": 0},
+            ReturnValues="UPDATED_NEW",
+        )
+        seq = int(resp["Attributes"]["counter_value"])
+    except Exception:
+        return _gen_id(prefix)
+    return f"{prefix}FY{fy}-{seq:04d}"
+
 def _to_decimal(obj):
     if isinstance(obj, float): return Decimal(str(obj))
     if isinstance(obj, dict): return {k: _to_decimal(v) for k, v in obj.items()}
@@ -68,6 +115,64 @@ def _scan_all(table_name):
         resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
         items.extend(resp.get("Items", []))
     return [_from_decimal(i) for i in items]
+
+
+def bulk_delete_all(table_name, key_fields):
+    """Delete ALL items from a DynamoDB table. key_fields = list of key attribute names."""
+    db = get_dynamodb()
+    table = db.Table(table_name)
+    items = _scan_all(table_name)
+    deleted = 0
+    with table.batch_writer() as batch:
+        for item in items:
+            key = {k: item[k] for k in key_fields if k in item}
+            if key:
+                # Convert back to proper types for DynamoDB keys
+                for k, v in key.items():
+                    if isinstance(v, float):
+                        key[k] = str(v) if '.' not in str(v) else Decimal(str(v))
+                batch.delete_item(Key=key)
+                deleted += 1
+    return deleted
+
+
+def bulk_delete_table_data(table_key):
+    """Delete all data from a table by its config key. Returns count deleted."""
+    table_keys_map = {
+        "master_items": ["item_id"],
+        "projects": ["project_id"],
+        "boq_items": ["project_id", "item_id"],
+        "inventory": ["item_id"],
+        "vendors": ["vendor_id"],
+        "service_vendors": ["vendor_id"],
+        "service_vendor_services": ["vendor_id", "service_id"],
+        "raw_material_po": ["po_id"],
+        "raw_material_po_items": ["po_id", "item_id"],
+        "service_po": ["po_id"],
+        "service_po_items": ["po_id", "item_id"],
+        "production_tracking": ["project_id", "product_id"],
+        "finished_goods": ["fg_id"],
+        "dispatched_goods": ["dispatch_id"],
+        "material_issues": ["issue_id"],
+        "order_staging": ["stage_id"],
+        "email_config": ["config_id"],
+    }
+    if table_key not in TABLES:
+        return 0
+    key_fields = table_keys_map.get(table_key, [])
+    if not key_fields:
+        return 0
+    return bulk_delete_all(TABLES[table_key], key_fields)
+
+
+def reset_counter(counter_name):
+    """Reset a sequential counter to 0."""
+    db = get_dynamodb()
+    table = db.Table(COUNTER_TABLE)
+    try:
+        table.put_item(Item={"counter_name": counter_name, "counter_value": 0})
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -418,7 +523,7 @@ def add_master_item(item_name, vendor, category, sub_category, specification, un
     db = get_dynamodb()
     table = db.Table(TABLES["master_items"])
     item = _to_decimal({
-        "item_id": _gen_id("MI-"), "item_name": item_name, "vendor": vendor,
+        "item_id": _next_sequential_id("MI-"), "item_name": item_name, "vendor": vendor,
         "category": category, "sub_category": sub_category, "specification": specification,
         "unit": unit, "location": location, "price": price, "revised_price": revised_price,
         "remarks": remarks, "created_at": _now(), "updated_at": _now(),
@@ -697,7 +802,7 @@ def create_raw_material_po(project_id, vendor_id, vendor_name, payment_terms, ex
     db = get_dynamodb()
     po_table = db.Table(TABLES["raw_material_po"])
     items_table = db.Table(TABLES["raw_material_po_items"])
-    po_id = _gen_id("RMPO-")
+    po_id = _next_po_id("RMPO-")
     total_amount = sum(i["quantity"] * i["unit_price"] for i in items)
     po = _to_decimal({"po_id": po_id, "project_id": project_id, "vendor_id": vendor_id,
             "vendor_name": vendor_name, "payment_terms": payment_terms,
@@ -758,7 +863,30 @@ def update_po_pdf_key(po_id, pdf_key, table_key="raw_material_po"):
         ExpressionAttributeValues={":pk": pdf_key})
 
 def place_po_via_sqs(po_id, vendor_email, vendor_name, items, total_amount, payment_terms, expected_delivery):
+    """Place PO: update status + send email to vendor + notify management."""
     update_raw_material_po_status(po_id, "Placed")
+    po_data = get_raw_material_po(po_id)
+    po_items = get_raw_material_po_items(po_id)
+    # Email vendor
+    if vendor_email:
+        send_po_email(po_data or {}, po_items or items, vendor_email, "Material")
+    # Email management
+    cfg = get_email_config()
+    mgmt = cfg.get("management_emails", [])
+    sender = cfg.get("sender_email", "")
+    company = cfg.get("company_name", "FabriFlow")
+    if mgmt and sender:
+        html = f"""<div style="font-family:Arial,sans-serif;padding:20px">
+            <h3>📦 Material PO Placed: {po_id}</h3>
+            <p><strong>Vendor:</strong> {vendor_name}</p>
+            <p><strong>Amount:</strong> ₹{total_amount:,.2f}</p>
+            <p><strong>Payment:</strong> {payment_terms}</p>
+            <p><strong>Expected Delivery:</strong> {expected_delivery}</p>
+            <p style="color:#64748b;font-size:0.85rem">— {company} ERP</p>
+        </div>"""
+        for m in mgmt:
+            if m:
+                send_email(m, f"PO Placed: {po_id} — {vendor_name}", html, sender)
     return True
 
 
@@ -769,7 +897,7 @@ def create_service_po(project_id, vendor_id, vendor_name, payment_terms, expecte
     db = get_dynamodb()
     po_table = db.Table(TABLES["service_po"])
     items_table = db.Table(TABLES["service_po_items"])
-    po_id = _gen_id("SPO-")
+    po_id = _next_po_id("SPO-")
     total_amount = sum(s["quantity"] * s["unit_price"] for s in services)
     po = _to_decimal({"po_id": po_id, "project_id": project_id, "vendor_id": vendor_id,
             "vendor_name": vendor_name, "payment_terms": payment_terms,
@@ -820,7 +948,29 @@ def update_service_po_status(po_id, status):
         ExpressionAttributeValues={":s": status, ":u": _now()})
 
 def place_service_po_via_sqs(po_id, vendor_email, vendor_name, services, total_amount, payment_terms, expected_delivery):
+    """Place Service PO: update status + send email to vendor + notify management."""
     update_service_po_status(po_id, "Placed")
+    po_data = {"po_id": po_id, "vendor_name": vendor_name, "payment_terms": payment_terms,
+               "expected_delivery": expected_delivery, "total_amount": total_amount}
+    spo_items = get_service_po_items(po_id)
+    if vendor_email:
+        send_po_email(po_data, spo_items or services, vendor_email, "Service")
+    cfg = get_email_config()
+    mgmt = cfg.get("management_emails", [])
+    sender = cfg.get("sender_email", "")
+    company = cfg.get("company_name", "FabriFlow")
+    if mgmt and sender:
+        html = f"""<div style="font-family:Arial,sans-serif;padding:20px">
+            <h3>🛠️ Service PO Placed: {po_id}</h3>
+            <p><strong>Vendor:</strong> {vendor_name}</p>
+            <p><strong>Amount:</strong> ₹{total_amount:,.2f}</p>
+            <p><strong>Payment:</strong> {payment_terms}</p>
+            <p><strong>Expected Return:</strong> {expected_delivery}</p>
+            <p style="color:#64748b;font-size:0.85rem">— {company} ERP</p>
+        </div>"""
+        for m in mgmt:
+            if m:
+                send_email(m, f"Service PO Placed: {po_id} — {vendor_name}", html, sender)
     return True
 
 

@@ -89,23 +89,39 @@ def render():
                 else:
                     st.info("No BOQ items. Add from master catalog below.")
 
-                # ─── Add BOQ from master items with search ────────
+                # ─── Add BOQ from master items with search + filters ────
                 st.markdown("#### ➕ Add BOQ Item from Master Catalog")
                 if not master_items:
                     st.warning("No master items. Add items in Master Items page first."); continue
 
-                # Search by name, category, sub_category
-                search = st.text_input("🔍 Search by name, category, or sub-category", key=f"ms_{pid}")
+                all_cats = sorted(set(m.get("category", "") for m in master_items if m.get("category")))
+                all_subcats = sorted(set(m.get("sub_category", "") for m in master_items if m.get("sub_category")))
+
+                fc1, fc2, fc3 = st.columns([2, 1, 1])
+                with fc1:
+                    search = st.text_input("🔍 Search by name, spec, or vendor", key=f"ms_{pid}")
+                with fc2:
+                    cat_filter = st.selectbox("Category", ["All"] + all_cats, key=f"mc_{pid}")
+                with fc3:
+                    # Filter sub_categories based on selected category
+                    if cat_filter != "All":
+                        filtered_subcats = sorted(set(m.get("sub_category", "") for m in master_items
+                                                      if m.get("category") == cat_filter and m.get("sub_category")))
+                    else:
+                        filtered_subcats = all_subcats
+                    subcat_filter = st.selectbox("Sub-Category", ["All"] + filtered_subcats, key=f"msc_{pid}")
 
                 mi_filtered = master_items
                 if search:
                     s = search.lower()
-                    mi_filtered = [m for m in master_items if
+                    mi_filtered = [m for m in mi_filtered if
                         s in m.get("item_name", "").lower() or
-                        s in m.get("category", "").lower() or
-                        s in m.get("sub_category", "").lower() or
                         s in m.get("specification", "").lower() or
                         s in m.get("vendor", "").lower()]
+                if cat_filter != "All":
+                    mi_filtered = [m for m in mi_filtered if m.get("category") == cat_filter]
+                if subcat_filter != "All":
+                    mi_filtered = [m for m in mi_filtered if m.get("sub_category") == subcat_filter]
 
                 mi_opts = {f"{m['item_name']} | {m.get('vendor','')} | {m.get('category','')} > {m.get('sub_category','')} | {m.get('specification','')} — ₹{m.get('revised_price',0) or m.get('price',0)} ({m['item_id']})": m
                            for m in mi_filtered[:200]}
@@ -125,11 +141,7 @@ def render():
                     with bc1:
                         qty = st.number_input("Quantity *", min_value=1, value=1, step=1, key=f"bq_{pid}")
                     with bc2:
-                        # FIX: Append the item_id to the key. 
-                        # This forces Streamlit to render a fresh widget with the updated default_rate 
-                        # whenever a different item is selected in the dropdown.
-                        dynamic_item_id = sel_mi.get("item_id", "default")
-                        rate = st.number_input("Rate (₹)", min_value=0.0, value=default_rate, step=0.5, key=f"br_{pid}_{dynamic_item_id}")
+                        rate = st.number_input("Rate (₹)", min_value=0.0, value=default_rate, step=0.5, key=f"br_{pid}")
 
                     if st.form_submit_button("➕ Add to BOQ"):
                         if sel_mi and qty > 0:
