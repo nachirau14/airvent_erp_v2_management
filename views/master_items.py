@@ -17,6 +17,9 @@ def render():
     with tab_add:
         section_header("Add New Master Item", "➕")
         existing_vendors = sorted(set(v.get("name", "") for v in get_all_vendors()))
+        all_items = get_all_master_items()
+        existing_categories = sorted(set(i.get("category", "") for i in all_items if i.get("category")))
+        existing_sub_categories = sorted(set(i.get("sub_category", "") for i in all_items if i.get("sub_category")))
 
         with st.form("add_master_item", clear_on_submit=True):
             c1, c2 = st.columns(2)
@@ -25,8 +28,12 @@ def render():
                 vendor = st.text_input("Vendor Name *", placeholder="Type vendor name — auto-created if new")
                 if existing_vendors:
                     st.caption(f"Existing vendors: {', '.join(existing_vendors[:10])}{'...' if len(existing_vendors) > 10 else ''}")
-                category = st.selectbox("Category", list(MATERIAL_CATEGORIES.keys()))
-                sub_category = st.selectbox("Sub-Category", MATERIAL_CATEGORIES.get(category, ["Custom"]))
+                category = st.text_input("Category *", placeholder="e.g., Mild Steel, Components, Consumables")
+                if existing_categories:
+                    st.caption(f"Existing: {', '.join(existing_categories[:10])}")
+                sub_category = st.text_input("Sub-Category *", placeholder="e.g., Sheet, Sensor, Welding Spool")
+                if existing_sub_categories:
+                    st.caption(f"Existing: {', '.join(existing_sub_categories[:15])}")
             with c2:
                 specification = st.text_input("Specification", placeholder="e.g., 2mm x 1250mm x 2500mm")
                 unit = st.selectbox("Unit", UNITS_OF_MEASURE)
@@ -36,15 +43,14 @@ def render():
             remarks = st.text_input("Remarks")
 
             if st.form_submit_button("✅ Add Master Item", use_container_width=True):
-                if item_name and vendor:
-                    # Auto-create vendor if not present
+                if item_name and vendor and category and sub_category:
                     ensure_vendor_exists(vendor.strip())
-                    r = add_master_item(item_name, vendor.strip(), category, sub_category,
+                    r = add_master_item(item_name, vendor.strip(), category.strip(), sub_category.strip(),
                                         specification, unit, location, price, revised_price, remarks)
                     st.success(f"Added **{item_name}** (Vendor: {vendor}) — ID: `{r['item_id']}`")
                     st.rerun()
                 else:
-                    st.error("Item Name and Vendor are required.")
+                    st.error("Item Name, Vendor, Category, and Sub-Category are required.")
 
     with tab_all:
         items = get_all_master_items()

@@ -43,6 +43,12 @@ def render():
         with c4: ed = st.date_input("Expected Return", value=datetime.now().date() + timedelta(days=14), key="spo_ed")
         notes = st.text_area("Notes", key="spo_n")
 
+        # Attachments during creation
+        st.markdown("---")
+        st.markdown("**📎 Attach files to this Service PO**")
+        new_spo_attachments = st.file_uploader("Choose files", accept_multiple_files=True, key="new_spo_attachments")
+        st.markdown("---")
+
         if "spo_items" not in st.session_state: st.session_state.spo_items = []
 
         with st.form("spo_manual", clear_on_submit=True):
@@ -73,6 +79,8 @@ def render():
                 if st.button("💾 Save Draft", key="spo_d", use_container_width=True):
                     po = create_service_po(project["project_id"], vendor["vendor_id"], vendor["name"],
                         pt, str(ed), st.session_state.spo_items, notes)
+                    for f in (new_spo_attachments or []):
+                        upload_attachment(po["po_id"], f.name, f.read(), f.type)
                     st.success(f"SPO **{po['po_id']}** saved"); st.session_state.spo_items = []; st.rerun()
             with cp:
                 if st.button("📤 Place Order", key="spo_pl", use_container_width=True, type="primary"):
@@ -82,6 +90,8 @@ def render():
                         st.session_state.spo_items, total, pt, str(ed))
                     pk = generate_po_pdf(po, st.session_state.spo_items, "Service")
                     if pk: update_po_pdf_key(po["po_id"], pk, "service_po")
+                    for f in (new_spo_attachments or []):
+                        upload_attachment(po["po_id"], f.name, f.read(), f.type)
                     st.success(f"SPO **{po['po_id']}** placed!"); st.session_state.spo_items = []; st.rerun()
 
     with tab1:

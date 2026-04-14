@@ -1,25 +1,13 @@
-"""Dashboard — overview with clickable navigation to each section."""
+"""Dashboard — overview of operations."""
 import streamlit as st
 import pandas as pd
 from utils.db import (get_all_projects, get_all_raw_material_pos, get_all_service_pos,
                        get_all_inventory, get_all_master_items,
                        get_finished_goods, get_dispatched_goods)
-from utils.ui_helpers import section_header, po_status_badge, format_currency, empty_state, styled_metric
-
-
-def _nav_button(label, icon, target_page):
-    """Render a button that sets sidebar radio to navigate."""
-    if st.button(f"{icon} {label}", use_container_width=True, key=f"nav_{target_page}"):
-        st.session_state["nav_target"] = target_page
-        st.rerun()
+from utils.ui_helpers import section_header, format_currency, empty_state, styled_metric
 
 
 def render():
-    # Handle navigation from button clicks
-    if "nav_target" in st.session_state:
-        # This will be picked up on next rerun by the sidebar radio
-        pass
-
     st.markdown("# 📊 Dashboard")
     st.markdown("*Overview of your fabrication operations*")
     st.markdown("---")
@@ -42,24 +30,6 @@ def render():
     with c6: styled_metric("Finished Goods", len([f for f in fg if f.get("status") == "In Store"]), color="#b45309")
 
     st.markdown("")
-
-    # ─── Quick Navigation ─────────────────────────────────────
-    st.markdown("### ⚡ Quick Navigation")
-    nc1, nc2, nc3, nc4, nc5 = st.columns(5)
-    with nc1: _nav_button("Master Items", "📦", "📦 Master Items")
-    with nc2: _nav_button("Projects & BOQ", "📋", "📋 Projects & BOQ")
-    with nc3: _nav_button("Order Staging", "🚀", "🚀 Order Staging")
-    with nc4: _nav_button("Purchase Orders", "📦", "📦 Purchase Orders")
-    with nc5: _nav_button("Inventory", "📦", "📦 Inventory")
-
-    nc6, nc7, nc8, nc9, nc10 = st.columns(5)
-    with nc6: _nav_button("Service POs", "🛠️", "🛠️ Service POs")
-    with nc7: _nav_button("Production", "🏗️", "🏗️ Production Tracking")
-    with nc8: _nav_button("Finished Goods", "✅", "✅ Finished Goods")
-    with nc9: _nav_button("Dispatch", "🚚", "🚚 Dispatch")
-    with nc10: _nav_button("Bulk Upload", "📤", "📤 Bulk Upload")
-
-    st.markdown("---")
 
     # ─── Active Projects ──────────────────────────────────────
     col_left, col_right = st.columns([3, 2])
