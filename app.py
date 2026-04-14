@@ -47,23 +47,32 @@ with st.sidebar:
     </div><hr style="border-color:#e2e8f0;margin:8px 0 16px 0">
     """, unsafe_allow_html=True)
 
+    # Pick up navigation from dashboard buttons
+    nav_pages = [
+        "📊 Dashboard",
+        "📦 Master Items",
+        "📋 Projects & BOQ",
+        "🚀 Order Staging",
+        "👥 Vendors",
+        "🔧 Service Vendors",
+        "📦 Purchase Orders",
+        "🛠️ Service POs",
+        "🏗️ Production Tracking",
+        "📦 Inventory",
+        "✅ Finished Goods",
+        "🚚 Dispatch",
+        "📤 Bulk Upload",
+    ]
+    default_idx = 0
+    if "nav_target" in st.session_state:
+        target = st.session_state.pop("nav_target")
+        if target in nav_pages:
+            default_idx = nav_pages.index(target)
+
     page = st.radio(
         "Navigation",
-        [
-            "📊 Dashboard",
-            "📦 Master Items",
-            "📋 Projects & BOQ",
-            "🚀 Order Staging",
-            "👥 Vendors",
-            "🔧 Service Vendors",
-            "📦 Purchase Orders",
-            "🛠️ Service POs",
-            "🏗️ Production Tracking",
-            "📦 Inventory",
-            "✅ Finished Goods",
-            "🚚 Dispatch",
-            "📤 Bulk Upload",
-        ],
+        nav_pages,
+        index=default_idx,
         label_visibility="collapsed",
     )
 
