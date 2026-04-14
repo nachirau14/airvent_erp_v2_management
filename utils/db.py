@@ -74,60 +74,160 @@ def _scan_all(table_name):
 #  S3 — PDF Generation & Attachments
 # ═══════════════════════════════════════════════════════════════════
 def generate_po_pdf(po_data, po_items, po_type="Material"):
-    """Generate a simple PDF for a PO and upload to S3. Returns the S3 key."""
+    """Generate a professional PDF for a PO and upload to S3. Returns the S3 key."""
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.units import mm
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER
     except ImportError:
         return None
 
+    # --- Company Configuration (Update these to match your actual ERP settings) ---
+    COMPANY_NAME = "AIRVENT PRIVATE LIMITED"
+    COMPANY_ADDRESS = "Plot no 460, IV Phase, Peenya Industrial Area, Bangalore,<br/>Bengaluru Urban, Karnataka<br/>India-560058"
+    COMPANY_GSTIN = "29AABCA2154P1ZF"
+    # ------------------------------------------------------------------------------
+
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20*mm, bottomMargin=20*mm)
+    # Adjusted margins to maximize usable space for the table
+    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=12*mm, leftMargin=12*mm, topMargin=15*mm, bottomMargin=15*mm)
     styles = getSampleStyleSheet()
+
+    # Custom ReportLab Styles for better text control
+    title_style = ParagraphStyle(name='TitleStyle', parent=styles['Heading1'], alignment=TA_CENTER, fontSize=16, fontName='Helvetica-Bold', spaceAfter=10)
+    bold_style = ParagraphStyle(name='BoldStyle', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9, leading=12)
+    normal_style = ParagraphStyle(name='NormStyle', parent=styles['Normal'], fontSize=8, leading=10)
+
     elements = []
 
-    # Header
-    elements.append(Paragraph(f"<b>PURCHASE ORDER</b>", styles["Title"]))
+    # 1. Document Title
+    elements.append(Paragraph("<b>PURCHASE ORDER</b>", title_style))
     elements.append(Spacer(1, 5*mm))
+
+    # 2. Header Info Grids (Buyer, Supplier, Shipping, PO Details)
     po_id = po_data.get("po_id", "")
-    elements.append(Paragraph(f"<b>PO Number:</b> {po_id}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Type:</b> {po_type}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Vendor:</b> {po_data.get('vendor_name', '')}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Payment Terms:</b> {po_data.get('payment_terms', '')}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Expected Delivery:</b> {po_data.get('expected_delivery', '')}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Date:</b> {_today()}", styles["Normal"]))
-    elements.append(Spacer(1, 8*mm))
+    vendor_name = po_data.get("vendor_name", "Unknown Vendor")
+    
+    # We use Paragraphs here so we can utilize HTML-like tags for multi-line formatting
+    buyer_html = f"<b>Name and Address of Buyer</b><br/><br/><b>{COMPANY_NAME}</b><br/>{COMPANY_ADDRESS}<br/><b>GSTIN:</b> {COMPANY_GSTIN}"
+    po_info_html = f"<b>PO Number:</b> {po_id}<br/><br/><b>PO Date:</b> {_today()}<br/><b>Delivery Date:</b> {po_data.get('expected_delivery', '')}<br/><b>Payment Terms:</b> {po_data.get('payment_terms', 'NET 30')}"
+    
+    # In a full production app, vendor address/GSTIN should be pulled dynamically from po_data
+    supplier_html = f"<b>Name and Address of Supplier</b><br/><br/><b>{vendor_name}</b><br/>Vendor Address and Contact Info<br/><b>GSTIN:</b> Unregistered / NA"
+    shipping_html = f"<b>Shipping Details</b><br/><br/><b>Main</b><br/>{COMPANY_ADDRESS}<br/><b>GSTIN:</b> {COMPANY_GSTIN}"
 
-    # Items table
-    data = [["#", "Description", "Specification", "Qty", "Unit", "Rate (₹)", "Amount (₹)"]]
+    # Grouping into a 2x2 Table
+    header_data = [
+        [Paragraph(buyer_html, normal_style), Paragraph(po_info_html, normal_style)],
+        [Paragraph(supplier_html, normal_style), Paragraph(shipping_html, normal_style)]
+    ]
+
+    header_table = Table(header_data, colWidths=[100*mm, 86*mm])
+    header_table.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('PADDING', (0,0), (-1,-1), 6),
+    ]))
+    elements.append(header_table)
+    elements.append(Spacer(1, 5*mm))
+
+    # 3. Line Items Table
+    # Added dedicated columns for taxes to mimic the professional GST format
+    item_headers = ["Sl No", "Description & Specifications", "Qty", "Rate (₹)", "Taxable Amt", "Tax (18%)", "Total (₹)"]
+    item_data = [item_headers]
+
+    total_taxable = 0
+    total_tax = 0
+
     for idx, item in enumerate(po_items, 1):
-        qty = item.get("quantity", 0)
-        rate = item.get("unit_price", item.get("rate", 0))
-        data.append([str(idx), item.get("description", ""), item.get("specification", ""),
-                      str(qty), item.get("unit", ""), f"{rate:,.2f}", f"{qty * rate:,.2f}"])
+        # Allow multi-line descriptions and specifications in a single cell
+        desc_text = f"<b>{item.get('description', '')}</b>"
+        if item.get("specification"):
+            desc_text += f"<br/><i>Details:</i> {item.get('specification', '')}"
 
-    total = sum(i.get("quantity", 0) * i.get("unit_price", i.get("rate", 0)) for i in po_items)
-    data.append(["", "", "", "", "", "Total", f"{total:,.2f}"])
+        qty = float(item.get("quantity", 0))
+        rate = float(item.get("unit_price", item.get("rate", 0)))
+        unit = item.get("unit", "Nos")
 
-    t = Table(data, repeatRows=1)
+        # Computations
+        taxable_amt = qty * rate
+        # Placeholder standard 18% tax logic; adjust to pull from DB if you track dynamic tax slabs
+        tax_amt = taxable_amt * 0.18 
+        row_total = taxable_amt + tax_amt
+
+        total_taxable += taxable_amt
+        total_tax += tax_amt
+
+        item_data.append([
+            str(idx),
+            Paragraph(desc_text, normal_style),
+            f"{qty:.2f} {unit}",
+            f"{rate:,.2f}",
+            f"{taxable_amt:,.2f}",
+            f"{tax_amt:,.2f}",
+            f"{row_total:,.2f}"
+        ])
+
+    grand_total = total_taxable + total_tax
+
+    # Add Calculation Totals Rows at the bottom of the table
+    item_data.append([
+        "", Paragraph("<b>Total (before Tax):</b>", bold_style),
+        "", "", "", "", f"{total_taxable:,.2f}"
+    ])
+    item_data.append([
+        "", Paragraph("<b>Total Tax (IGST/CGST/SGST):</b>", bold_style),
+        "", "", "", "", f"{total_tax:,.2f}"
+    ])
+    item_data.append([
+        "", Paragraph("<b>Grand Total:</b>", bold_style),
+        "", "", "", "", f"₹ {grand_total:,.2f}"
+    ])
+
+    # Table Width Mapping
+    t = Table(item_data, colWidths=[12*mm, 60*mm, 20*mm, 20*mm, 24*mm, 24*mm, 26*mm])
     t.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e40af")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
-        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#f1f5f9")),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        # Header Styling
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f4f4f5")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+
+        # Number Column Alignments
+        ('ALIGN', (2, 1), (-1, -1), 'RIGHT'),
+
+        # Span and align the Totals label cells horizontally
+        ('SPAN', (1, -3), (5, -3)),
+        ('SPAN', (1, -2), (5, -2)),
+        ('SPAN', (1, -1), (5, -1)),
+        ('ALIGN', (1, -3), (1, -1), 'RIGHT'),
     ]))
     elements.append(t)
-    elements.append(Spacer(1, 10*mm))
-    if po_data.get("notes"):
-        elements.append(Paragraph(f"<b>Notes:</b> {po_data['notes']}", styles["Normal"]))
+    elements.append(Spacer(1, 5*mm))
 
+    # 4. Footer Section
+    notes = po_data.get("notes", "N/A")
+    footer_left = f"<b>Terms And Conditions:</b><br/>1. {notes}<br/>2. This is a computer generated document."
+    footer_right = f"<b>For {COMPANY_NAME}</b><br/><br/><br/><br/>Authorised Signatory"
+
+    footer_data = [
+        [Paragraph(footer_left, normal_style), Paragraph(footer_right, bold_style)]
+    ]
+    footer_table = Table(footer_data, colWidths=[120*mm, 66*mm])
+    footer_table.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('ALIGN', (1,0), (1,0), 'RIGHT'),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('PADDING', (0,0), (-1,-1), 6),
+    ]))
+    elements.append(footer_table)
+
+    # Build and Save
     doc.build(elements)
     buf.seek(0)
 
@@ -135,13 +235,11 @@ def generate_po_pdf(po_data, po_items, po_type="Material"):
     s3_key = f"po/{po_type.lower()}/{_today()}/{po_id}.pdf"
     try:
         s3 = get_s3_client()
-        s3.put_object(Bucket=S3_PO_PDF_BUCKET, Key=s3_key, Body=buf.getvalue(),
-                       ContentType="application/pdf")
+        s3.put_object(Bucket=S3_PO_PDF_BUCKET, Key=s3_key, Body=buf.getvalue(), ContentType="application/pdf")
         return s3_key
     except Exception as e:
         st.warning(f"S3 upload failed: {e}")
         return None
-
 
 def get_po_pdf_download(s3_key):
     """Download PDF bytes from S3 for display."""
