@@ -567,9 +567,15 @@ def get_master_items_by_vendor(vendor_name):
     return [i for i in items if i.get("vendor", "").lower() == vendor_name.lower()]
 
 def bulk_upload_master_items(items_list):
+    """Bulk upload master items. Auto-creates vendors (deduplicated)."""
+    # Collect unique vendor names and create them first
+    vendor_names = set(str(item.get("vendor", "")).strip() for item in items_list if item.get("vendor", "").strip())
+    for vname in vendor_names:
+        ensure_vendor_exists(vname)
+    # Now upload items
     results = []
     for item in items_list:
-        r = add_master_item(item.get("item_name", ""), item.get("vendor", ""),
+        r = add_master_item(item.get("item_name", ""), str(item.get("vendor", "")).strip(),
             item.get("category", ""), item.get("sub_category", ""),
             item.get("specification", ""), item.get("unit", "Nos"),
             item.get("location", "Main Store"), float(item.get("price", 0)),
