@@ -69,12 +69,31 @@ def render():
                 boq = get_boq_items(pid)
                 if boq:
                     total = sum(i.get("total", 0) for i in boq)
-                    st.markdown(f"**{len(boq)} items** | **Estimated: {format_currency(total)}**")
+                    staged_count = sum(1 for i in boq if i.get("staged", False))
+                    unstaged_count = len(boq) - staged_count
+
+                    sc1, sc2, sc3 = st.columns(3)
+                    with sc1:
+                        st.markdown(f"**{len(boq)} total items** | **{format_currency(total)}**")
+                    with sc2:
+                        if staged_count:
+                            st.markdown(f"✅ **{staged_count}** staged/ordered")
+                    with sc3:
+                        if unstaged_count:
+                            st.markdown(f"🆕 **{unstaged_count}** new (not yet staged)")
+
+                    # Add staged column to display
                     df = pd.DataFrame(boq)
-                    cols = ["item_id", "item_name", "vendor", "category", "specification", "quantity", "unit", "rate", "total"]
+                    df["status"] = df.apply(lambda r: "✅ Staged" if r.get("staged", False) else "🆕 New", axis=1)
+                    cols = ["item_id", "item_name", "vendor", "category", "specification", "quantity", "unit", "rate", "total", "status"]
                     available = [c for c in cols if c in df.columns]
                     if available:
-                        st.dataframe(df[available], use_container_width=True, hide_index=True)
+                        def highlight_staged(row):
+                            if row.get("status") == "✅ Staged":
+                                return ["background-color: #f0fdf4"] * len(row)
+                            return ["background-color: #eff6ff"] * len(row)
+                        st.dataframe(df[available].style.apply(highlight_staged, axis=1),
+                                     use_container_width=True, hide_index=True)
 
                     del_opts = [f"{i['item_id']} — {i.get('item_name', '')}" for i in boq]
                     del_sel = st.selectbox("Delete item", [""] + del_opts, key=f"db_{pid}")
@@ -82,10 +101,17 @@ def render():
                         delete_boq_item(pid, del_sel.split(" — ")[0]); st.rerun()
 
                     st.markdown("---")
-                    if st.button("🚀 Stage Purchase Orders from BOQ", key=f"stg_{pid}", type="primary", use_container_width=True):
-                        staged = create_staged_orders_from_boq(pid)
-                        st.success(f"Created **{len(staged)}** staged POs. Go to 🚀 Order Staging to review.")
-                        st.rerun()
+                    if unstaged_count > 0:
+                        if st.button(f"🚀 Stage {unstaged_count} New Item(s) for Purchase Orders",
+                                     key=f"stg_{pid}", type="primary", use_container_width=True):
+                            staged = create_staged_orders_from_boq(pid)
+                            if staged:
+                                st.success(f"Staged **{len(staged)}** vendor PO(s) from **{unstaged_count}** new items. Go to 🚀 Order Staging to review.")
+                            else:
+                                st.info("No new items to stage.")
+                            st.rerun()
+                    else:
+                        st.success("All BOQ items have been staged. Add more items below if needed.")
                 else:
                     st.info("No BOQ items. Add from master catalog below.")
 

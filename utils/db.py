@@ -621,7 +621,7 @@ def add_boq_item(project_id, master_item_id, item_name, vendor, category, sub_ca
         "master_item_id": master_item_id, "item_name": item_name, "vendor": vendor,
         "category": category, "sub_category": sub_category,
         "specification": specification, "quantity": quantity, "unit": unit,
-        "rate": rate, "total": quantity * rate, "created_at": _now(),
+        "rate": rate, "total": quantity * rate, "staged": False, "created_at": _now(),
     })
     table.put_item(Item=item)
     return _from_decimal(item)
@@ -631,6 +631,22 @@ def get_boq_items(project_id):
     table = db.Table(TABLES["boq_items"])
     resp = table.query(KeyConditionExpression=Key("project_id").eq(project_id))
     return [_from_decimal(i) for i in resp.get("Items", [])]
+
+def get_unstaged_boq_items(project_id):
+    """Get only BOQ items that haven't been staged yet."""
+    all_items = get_boq_items(project_id)
+    return [i for i in all_items if not i.get("staged", False)]
+
+def mark_boq_items_staged(project_id, item_ids):
+    """Mark specific BOQ items as staged."""
+    db = get_dynamodb()
+    table = db.Table(TABLES["boq_items"])
+    for item_id in item_ids:
+        table.update_item(
+            Key={"project_id": project_id, "item_id": item_id},
+            UpdateExpression="SET staged = :s",
+            ExpressionAttributeValues={":s": True},
+        )
 
 def delete_boq_item(project_id, item_id):
     db = get_dynamodb()
@@ -733,16 +749,20 @@ def get_service_vendor_services(vendor_id):
 #  ORDER STAGING — fixed reserved keyword 'items'
 # ═══════════════════════════════════════════════════════════════════
 def create_staged_orders_from_boq(project_id):
-    boq_items = get_boq_items(project_id)
+    """Stage only NEW (unstaged) BOQ items. Already-staged items are skipped."""
+    unstaged = get_unstaged_boq_items(project_id)
+    if not unstaged:
+        return []
     db = get_dynamodb()
     table = db.Table(TABLES["order_staging"])
     vendor_groups = {}
-    for item in boq_items:
+    for item in unstaged:
         vendor = item.get("vendor", "Unknown")
         if vendor not in vendor_groups:
             vendor_groups[vendor] = []
         vendor_groups[vendor].append(item)
     staged = []
+    staged_item_ids = []
     for vendor_name, vitems in vendor_groups.items():
         stage_id = _gen_id("STG-")
         total = sum(i.get("total", 0) for i in vitems)
@@ -754,6 +774,10 @@ def create_staged_orders_from_boq(project_id):
         })
         table.put_item(Item=entry)
         staged.append(_from_decimal(entry))
+        staged_item_ids.extend([i["item_id"] for i in vitems])
+    # Mark all these BOQ items as staged
+    if staged_item_ids:
+        mark_boq_items_staged(project_id, staged_item_ids)
     return staged
 
 def get_staged_orders(project_id=None):
