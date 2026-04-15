@@ -141,7 +141,11 @@ def render():
                     with bc1:
                         qty = st.number_input("Quantity *", min_value=1, value=1, step=1, key=f"bq_{pid}")
                     with bc2:
-                        rate = st.number_input("Rate (₹)", min_value=0.0, value=default_rate, step=0.5, key=f"br_{pid}")
+                        # FIX: Append the item_id to the key. 
+                        # This forces Streamlit to render a fresh widget with the updated default_rate 
+                        # whenever a different item is selected in the dropdown.
+                        dynamic_item_id = sel_mi.get("item_id", "default")
+                        rate = st.number_input("Rate (₹)", min_value=0.0, value=default_rate, step=0.5, key=f"br_{pid}_{dynamic_item_id}")
 
                     if st.form_submit_button("➕ Add to BOQ"):
                         if sel_mi and qty > 0:
