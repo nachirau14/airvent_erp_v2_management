@@ -1007,19 +1007,40 @@ def place_service_po_via_sqs(po_id, vendor_email, vendor_name, services, total_a
 # ═══════════════════════════════════════════════════════════════════
 #  INVENTORY
 # ═══════════════════════════════════════════════════════════════════
-def add_inventory_item(master_item_id, item_name, vendor, category, sub_category,
+def add_inventory_item(master_item_id, item_name, category, sub_category,
                        specification, quantity, unit, location, price, remarks=""):
+    """Add a brand new inventory item (used when manually adding stock)."""
     db = get_dynamodb()
     table = db.Table(TABLES["inventory"])
     item = _to_decimal({
         "item_id": _gen_id("INV-"), "master_item_id": master_item_id,
-        "item_name": item_name, "vendor": vendor, "category": category,
+        "item_name": item_name, "category": category,
         "sub_category": sub_category, "specification": specification,
         "quantity": quantity, "unit": unit, "location": location,
         "price": price, "remarks": remarks, "updated_at": _now(),
     })
     table.put_item(Item=item)
     return _from_decimal(item)
+
+
+def receive_to_inventory(item_name, category, sub_category, specification, quantity, unit,
+                         location="Main Store", price=0):
+    """Receive material into inventory. Aggregates with existing stock by
+    item_name + specification + category (vendor-agnostic).
+    If a matching entry exists, increments its quantity.
+    If not, creates a new entry."""
+    inventory = get_all_inventory()
+    # Find match by name + spec + category (ignore vendor)
+    for inv in inventory:
+        if (inv.get("item_name", "").lower().strip() == item_name.lower().strip()
+            and inv.get("specification", "").lower().strip() == specification.lower().strip()
+            and inv.get("category", "").lower().strip() == category.lower().strip()):
+            # Found match — increment quantity
+            update_inventory_qty(inv["item_id"], quantity)
+            return inv
+    # No match — create new entry (no vendor field)
+    return add_inventory_item("", item_name, category, sub_category,
+                              specification, quantity, unit, location, price)
 
 def get_all_inventory():
     return _scan_all(TABLES["inventory"])

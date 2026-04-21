@@ -132,34 +132,54 @@ def render():
 
                 st.markdown("---")
                 po_items = get_service_po_items(po["po_id"])
-                all_received = True
-                for item in po_items:
-                    st.markdown(f"**{item.get('description', '')}** — {item.get('specification', '')}")
-                    rc1, rc2, rc3 = st.columns(3)
-                    with rc1:
-                        st.caption(f"Ordered: {item.get('quantity', 0)} {item.get('unit', '')}")
-                        qr = st.number_input("Qty Received", min_value=0.0, max_value=float(item.get("quantity", 0)),
-                            value=float(item.get("quantity_received", 0)), step=1.0, key=f"sqr_{po['po_id']}_{item['item_id']}")
-                        ir = st.checkbox("Received", value=item.get("received", False), key=f"sc_{po['po_id']}_{item['item_id']}")
-                    with rc2:
-                        fs = st.selectbox("Finishing", FINISHING_STATUSES,
-                            index=FINISHING_STATUSES.index(item.get("finishing_status", "Pending"))
-                            if item.get("finishing_status") in FINISHING_STATUSES else 0, key=f"sfs_{po['po_id']}_{item['item_id']}")
-                        fc = st.text_area("Comment", value=item.get("finishing_comment", ""), height=60, key=f"sfc_{po['po_id']}_{item['item_id']}")
-                    with rc3:
-                        st.markdown("**Scrap**")
-                        scr = st.number_input("Scrap Qty", min_value=0.0, step=0.5, value=float(item.get("scrap_received", 0)), key=f"scr_{po['po_id']}_{item['item_id']}")
-                        su = st.checkbox("Usable?", value=item.get("scrap_usable", False), key=f"ssu_{po['po_id']}_{item['item_id']}")
-                        sn = st.text_input("Scrap Notes", value=item.get("scrap_notes", ""), key=f"ssn_{po['po_id']}_{item['item_id']}")
-                    if not ir: all_received = False
-                    if st.button("💾 Update", key=f"sup_{po['po_id']}_{item['item_id']}"):
-                        update_service_po_item(po["po_id"], item["item_id"], qr, ir, fs, fc, scr, su, sn)
-                        st.success("Updated!"); st.rerun()
-                    st.markdown("<hr style='margin:8px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
+                is_complete = status == "Complete"
 
-                if all_received and po_items and status != "Complete":
-                    if st.button("✅ Mark Complete", key=f"scomp_{po['po_id']}", type="primary"):
-                        update_service_po_status(po["po_id"], "Complete"); st.rerun()
+                if is_complete:
+                    # ─── COMPLETE: Read-only view ─────────────────
+                    st.success("✅ This Service PO is complete. All items received.")
+                    for item in po_items:
+                        st.markdown(f"**{item.get('description', '')}** — {item.get('specification', '')}")
+                        rc1, rc2, rc3 = st.columns(3)
+                        with rc1:
+                            st.caption(f"Ordered: {item.get('quantity', 0)} {item.get('unit', '')} | Received: {item.get('quantity_received', 0)} ✅")
+                        with rc2:
+                            st.caption(f"Finishing: {item.get('finishing_status', '')} | {item.get('finishing_comment', '')}")
+                        with rc3:
+                            scrap = item.get("scrap_received", 0)
+                            if scrap:
+                                st.caption(f"Scrap: {scrap} {'(usable)' if item.get('scrap_usable') else ''} {item.get('scrap_notes', '')}")
+                        st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
+                else:
+                    # ─── EDITABLE: Receipt tracking ───────────────
+                    all_received = True
+                    for item in po_items:
+                        st.markdown(f"**{item.get('description', '')}** — {item.get('specification', '')}")
+                        rc1, rc2, rc3 = st.columns(3)
+                        with rc1:
+                            st.caption(f"Ordered: {item.get('quantity', 0)} {item.get('unit', '')}")
+                            qr = st.number_input("Qty Received", min_value=0.0, max_value=float(item.get("quantity", 0)),
+                                value=float(item.get("quantity_received", 0)), step=1.0, key=f"sqr_{po['po_id']}_{item['item_id']}")
+                            ir = st.checkbox("Received", value=item.get("received", False), key=f"sc_{po['po_id']}_{item['item_id']}")
+                        with rc2:
+                            fs = st.selectbox("Finishing", FINISHING_STATUSES,
+                                index=FINISHING_STATUSES.index(item.get("finishing_status", "Pending"))
+                                if item.get("finishing_status") in FINISHING_STATUSES else 0, key=f"sfs_{po['po_id']}_{item['item_id']}")
+                            fc = st.text_area("Comment", value=item.get("finishing_comment", ""), height=60, key=f"sfc_{po['po_id']}_{item['item_id']}")
+                        with rc3:
+                            st.markdown("**Scrap**")
+                            scr = st.number_input("Scrap Qty", min_value=0.0, step=0.5, value=float(item.get("scrap_received", 0)), key=f"scr_{po['po_id']}_{item['item_id']}")
+                            su = st.checkbox("Usable?", value=item.get("scrap_usable", False), key=f"ssu_{po['po_id']}_{item['item_id']}")
+                            sn = st.text_input("Scrap Notes", value=item.get("scrap_notes", ""), key=f"ssn_{po['po_id']}_{item['item_id']}")
+                        if not ir: all_received = False
+                        if st.button("💾 Update", key=f"supd_{po['po_id']}_{item['item_id']}"):
+                            update_service_po_item(po["po_id"], item["item_id"], qr, ir, fs, fc, scr, su, sn)
+                            st.success("Updated!"); st.rerun()
+                        st.markdown("<hr style='margin:8px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
+
+                    if all_received and po_items:
+                        if st.button("✅ Mark Complete", key=f"scomp_{po['po_id']}", type="primary"):
+                            update_service_po_status(po["po_id"], "Complete"); st.rerun()
+
                 if status == "Draft":
                     if st.button("📤 Place Order", key=f"spl_{po['po_id']}", type="primary"):
                         place_service_po_via_sqs(po["po_id"], "", po.get("vendor_name", ""), [], 0, "", "")

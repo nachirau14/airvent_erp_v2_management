@@ -1,17 +1,18 @@
-"""Purchase Orders — attachment upload available during creation and after."""
+"""Purchase Orders — completed POs locked, inventory aggregated on receipt."""
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from utils.db import (
-    get_all_projects, get_all_vendors, get_vendor, get_all_master_items,
+    get_all_projects, get_all_vendors, get_all_master_items,
     create_raw_material_po, get_all_raw_material_pos,
     get_raw_material_po_items, update_po_item_receipt,
-    update_raw_material_po_status, place_po_via_sqs, add_inventory_item,
+    update_raw_material_po_status, place_po_via_sqs,
+    receive_to_inventory,
     generate_po_pdf, update_po_pdf_key, get_po_pdf_download,
     upload_attachment, list_attachments, get_attachment,
 )
 from utils.ui_helpers import section_header, format_currency, empty_state
-from config import PAYMENT_TERMS, PO_STATUSES
+from config import PAYMENT_TERMS
 
 
 def _status_icon(status):
@@ -19,29 +20,26 @@ def _status_icon(status):
 
 
 def _render_attachments(po_id):
-    """Show existing attachments + upload for a PO."""
     st.markdown("**📎 Attachments**")
-    att_keys = list_attachments(po_id)
-    for ak in att_keys:
-        fname = ak.split("/")[-1]
+    for ak in list_attachments(po_id):
         ab = get_attachment(ak)
         if ab:
-            st.download_button(f"⬇️ {fname}", ab, fname, key=f"att_{ak}")
+            st.download_button(f"⬇️ {ak.split('/')[-1]}", ab, ak.split("/")[-1], key=f"att_{ak}")
     uploaded = st.file_uploader("Add attachment", key=f"up_{po_id}")
-    if uploaded:
-        if st.button("📤 Upload", key=f"upbtn_{po_id}"):
-            upload_attachment(po_id, uploaded.name, uploaded.read(), uploaded.type)
-            st.success(f"Attached {uploaded.name}")
-            st.rerun()
+    if uploaded and st.button("📤 Upload", key=f"upbtn_{po_id}"):
+        upload_attachment(po_id, uploaded.name, uploaded.read(), uploaded.type)
+        st.success(f"Attached {uploaded.name}")
+        st.rerun()
 
 
 def render():
     st.markdown("# 📦 Purchase Orders")
-    st.markdown("*Create, track, receive, download PDF, and attach files*")
+    st.markdown("*Create, track, receive — completed POs are locked*")
     st.markdown("---")
 
     tab1, tab2 = st.tabs(["📋 All POs", "➕ Create PO"])
 
+    # ─── Create PO ────────────────────────────────────────────
     with tab2:
         section_header("Create Purchase Order", "🆕")
         projects = get_all_projects()
@@ -74,11 +72,9 @@ def render():
 
         notes = st.text_area("Notes")
 
-        # Attachments during creation — stored in session until PO is saved
         st.markdown("---")
         st.markdown("**📎 Attach files to this PO**")
         new_attachments = st.file_uploader("Choose files", accept_multiple_files=True, key="new_po_attachments")
-
         st.markdown("---")
 
         if "po_items" not in st.session_state:
@@ -102,8 +98,10 @@ def render():
                         if st.button("Add", key=f"va_{mi['item_id']}"):
                             if qty > 0:
                                 st.session_state.po_items.append({"description": mi["item_name"],
-                                    "specification": mi.get("specification", ""), "quantity": qty,
-                                    "unit": mi.get("unit", "Kg"), "unit_price": price})
+                                    "specification": mi.get("specification", ""),
+                                    "category": mi.get("category", ""),
+                                    "sub_category": mi.get("sub_category", ""),
+                                    "quantity": qty, "unit": mi.get("unit", "Kg"), "unit_price": price})
                                 st.rerun()
 
         with st.form("manual_item", clear_on_submit=True):
@@ -121,6 +119,7 @@ def render():
             if st.form_submit_button("➕ Add Line Item"):
                 if desc and qty > 0:
                     st.session_state.po_items.append({"description": desc, "specification": spec,
+                        "category": "", "sub_category": "",
                         "quantity": qty, "unit": unit, "unit_price": price})
                     st.rerun()
 
@@ -147,7 +146,6 @@ def render():
                 if st.button("💾 Save Draft", use_container_width=True):
                     po = create_raw_material_po(project["project_id"], vendor["vendor_id"], vendor["name"],
                         payment_terms, str(expected_delivery), st.session_state.po_items, notes)
-                    # Upload any attachments
                     for f in (new_attachments or []):
                         upload_attachment(po["po_id"], f.name, f.read(), f.type)
                     st.success(f"PO **{po['po_id']}** saved")
@@ -179,6 +177,7 @@ def render():
             status = po.get("status", "Draft")
             icon = _status_icon(status)
             label = f"{icon} [{status}] {po['po_id']} — {po.get('vendor_name', '')} | {format_currency(po.get('total_amount', 0))}"
+            is_complete = status == "Complete"
 
             with st.expander(label):
                 pc1, pc2, pc3 = st.columns(3)
@@ -208,45 +207,63 @@ def render():
                             st.success("PDF generated!")
                             st.rerun()
 
-                # Attachments
                 _render_attachments(po["po_id"])
-
                 st.markdown("---")
+
                 po_items = get_raw_material_po_items(po["po_id"])
                 if po_items:
-                    all_received = True
-                    for item in po_items:
-                        rc1, rc2, rc3, rc4, rc5 = st.columns([3, 1, 1, 1, 1])
-                        with rc1:
-                            st.markdown(f"**{item.get('description', '')}**")
-                            st.caption(item.get("specification", ""))
-                        with rc2:
-                            st.caption(f"Ord: {item.get('quantity', 0)} {item.get('unit', '')}")
-                        with rc3:
-                            st.caption(f"Rcvd: {item.get('quantity_received', 0)}")
-                        with rc4:
-                            qr = st.number_input("Recv", min_value=0.0, max_value=float(item.get("quantity", 0)),
-                                value=float(item.get("quantity_received", 0)), step=1.0,
-                                key=f"rv_{po['po_id']}_{item['item_id']}", label_visibility="collapsed")
-                        with rc5:
-                            ir = st.checkbox("✅", value=item.get("received", False),
-                                key=f"ck_{po['po_id']}_{item['item_id']}")
-                        if not ir:
-                            all_received = False
-                        if qr != item.get("quantity_received", 0) or ir != item.get("received", False):
-                            if st.button("Save", key=f"sv_{po['po_id']}_{item['item_id']}"):
-                                update_po_item_receipt(po["po_id"], item["item_id"], qr, ir)
-                                if ir and qr > 0:
-                                    add_inventory_item("", item.get("description", ""), po.get("vendor_name", ""),
-                                        "Received", "PO Receipt", item.get("specification", ""),
-                                        qr, item.get("unit", "Kg"), "Main Store", item.get("unit_price", 0))
-                                st.success("Updated!")
-                                st.rerun()
+                    if is_complete:
+                        # ─── COMPLETE: Read-only view ─────────────────
+                        st.success("✅ This PO is complete. All items received.")
+                        for item in po_items:
+                            rc1, rc2, rc3 = st.columns([4, 1, 1])
+                            with rc1:
+                                st.markdown(f"**{item.get('description', '')}** — {item.get('specification', '')}")
+                            with rc2:
+                                st.caption(f"Ordered: {item.get('quantity', 0)} {item.get('unit', '')}")
+                            with rc3:
+                                st.caption(f"Received: {item.get('quantity_received', 0)} ✅")
+                    else:
+                        # ─── EDITABLE: Receipt tracking ───────────────
+                        all_received = True
+                        for item in po_items:
+                            rc1, rc2, rc3, rc4, rc5 = st.columns([3, 1, 1, 1, 1])
+                            with rc1:
+                                st.markdown(f"**{item.get('description', '')}**")
+                                st.caption(item.get("specification", ""))
+                            with rc2:
+                                st.caption(f"Ord: {item.get('quantity', 0)} {item.get('unit', '')}")
+                            with rc3:
+                                st.caption(f"Rcvd: {item.get('quantity_received', 0)}")
+                            with rc4:
+                                qr = st.number_input("Recv", min_value=0.0, max_value=float(item.get("quantity", 0)),
+                                    value=float(item.get("quantity_received", 0)), step=1.0,
+                                    key=f"rv_{po['po_id']}_{item['item_id']}", label_visibility="collapsed")
+                            with rc5:
+                                ir = st.checkbox("✅", value=item.get("received", False),
+                                    key=f"ck_{po['po_id']}_{item['item_id']}")
+                            if not ir:
+                                all_received = False
+                            if qr != item.get("quantity_received", 0) or ir != item.get("received", False):
+                                if st.button("Save", key=f"sv_{po['po_id']}_{item['item_id']}"):
+                                    update_po_item_receipt(po["po_id"], item["item_id"], qr, ir)
+                                    if ir and qr > 0:
+                                        # Aggregate into inventory (vendor-agnostic)
+                                        receive_to_inventory(
+                                            item.get("description", ""),
+                                            item.get("category", "Received"),
+                                            item.get("sub_category", "PO Receipt"),
+                                            item.get("specification", ""),
+                                            qr, item.get("unit", "Kg"),
+                                            "Main Store", item.get("unit_price", 0),
+                                        )
+                                    st.success("Updated & stock adjusted!")
+                                    st.rerun()
 
-                    if all_received and po_items and status != "Complete":
-                        if st.button("✅ Mark Complete", key=f"comp_{po['po_id']}", type="primary"):
-                            update_raw_material_po_status(po["po_id"], "Complete")
-                            st.rerun()
+                        if all_received and po_items:
+                            if st.button("✅ Mark Complete", key=f"comp_{po['po_id']}", type="primary"):
+                                update_raw_material_po_status(po["po_id"], "Complete")
+                                st.rerun()
 
                 if status == "Draft":
                     if st.button("📤 Place Order", key=f"pl_{po['po_id']}", type="primary"):
