@@ -149,6 +149,16 @@ def render():
                             if scrap:
                                 st.caption(f"Scrap: {scrap} {'(usable)' if item.get('scrap_usable') else ''} {item.get('scrap_notes', '')}")
                         st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
+
+                    # Override: reopen as incomplete
+                    with st.expander("⚠️ Override — Mark as Incomplete"):
+                        st.warning("This will reopen the Service PO for editing. Use only if it was marked complete by mistake.")
+                        confirm_text = st.text_input("Type **INCOMPLETE** to confirm", key=f"sreopen_{po['po_id']}")
+                        if st.button("🔓 Reopen Service PO", key=f"sreopen_btn_{po['po_id']}",
+                                     disabled=confirm_text.strip().upper() != "INCOMPLETE"):
+                            update_service_po_status(po["po_id"], "Partially Received")
+                            st.success("Service PO reopened — you can now edit received quantities.")
+                            st.rerun()
                 else:
                     # ─── EDITABLE: Receipt tracking ───────────────
                     all_received = True

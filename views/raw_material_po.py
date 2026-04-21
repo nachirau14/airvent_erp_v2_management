@@ -223,6 +223,16 @@ def render():
                                 st.caption(f"Ordered: {item.get('quantity', 0)} {item.get('unit', '')}")
                             with rc3:
                                 st.caption(f"Received: {item.get('quantity_received', 0)} ✅")
+
+                        # Override: reopen as incomplete
+                        with st.expander("⚠️ Override — Mark as Incomplete"):
+                            st.warning("This will reopen the PO for editing. Use only if it was marked complete by mistake.")
+                            confirm_text = st.text_input("Type **INCOMPLETE** to confirm", key=f"reopen_{po['po_id']}")
+                            if st.button("🔓 Reopen PO", key=f"reopen_btn_{po['po_id']}",
+                                         disabled=confirm_text.strip().upper() != "INCOMPLETE"):
+                                update_raw_material_po_status(po["po_id"], "Partially Received")
+                                st.success("PO reopened — you can now edit received quantities.")
+                                st.rerun()
                     else:
                         # ─── EDITABLE: Receipt tracking ───────────────
                         all_received = True
