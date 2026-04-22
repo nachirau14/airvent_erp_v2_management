@@ -253,6 +253,14 @@ def render():
                             with rc3:
                                 if is_item_done:
                                     st.success(f"✅ Fully received ({already_received})")
+                                    # 1. NEW: Reopen individual completed item
+                                    with st.expander("⚠️ Mark as Incomplete"):
+                                        confirm_item = st.text_input("Type INCOMPLETE to confirm", key=f"reopen_item_{po['po_id']}_{item['item_id']}")
+                                        if st.button("🔓 Reopen Item", key=f"reopen_item_btn_{po['po_id']}_{item['item_id']}", disabled=confirm_item.strip().upper() != "INCOMPLETE"):
+                                            update_po_item_receipt(po["po_id"], item["item_id"], already_received, False)
+                                            # Reset parent PO status in case it was entirely complete
+                                            update_raw_material_po_status(po["po_id"], "Partially Received")
+                                            st.rerun()
                                 else:
                                     all_received = False
 
@@ -271,30 +279,53 @@ def render():
                                     with fc3:
                                         submitted = st.form_submit_button("💾 Receive")
 
-                                    if submitted and recv_now > 0:
+                                if submitted:
+                                    # 2. NEW: Auto-receive remaining balance if marked complete
+                                    if mark_complete:
+                                        qty_to_add = remaining
+                                        new_total = ordered
+                                        is_done = True
+                                    else:
+                                        qty_to_add = recv_now
                                         new_total = already_received + recv_now
-                                        is_done = mark_complete or (new_total >= ordered)
-                                        update_po_item_receipt(po["po_id"], item["item_id"], new_total, is_done)
-                                        # Add only what was received NOW to inventory
+                                        is_done = (new_total >= ordered)
+
+                                    if qty_to_add > 0:
                                         receive_to_inventory(
                                             item.get("description", ""),
                                             item.get("category", "Received"),
                                             item.get("sub_category", "PO Receipt"),
                                             item.get("specification", ""),
-                                            recv_now, item.get("unit", "Kg"),
+                                            qty_to_add, item.get("unit", "Kg"),
                                             "Main Store", item.get("unit_price", 0),
                                         )
-                                        st.success(f"Received {recv_now} — total now {new_total}/{ordered}")
-                                        st.rerun()
-                                    elif submitted and recv_now == 0 and mark_complete:
-                                        update_po_item_receipt(po["po_id"], item["item_id"], already_received, True)
-                                        st.success("Marked as fully received")
-                                        st.rerun()
+                                    
+                                    update_po_item_receipt(po["po_id"], item["item_id"], new_total, is_done)
+                                    st.success(f"Received {qty_to_add} — total now {new_total}/{ordered}")
+                                    st.rerun()
 
                             st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
 
-                        if all_received and po_items:
-                            if st.button("✅ Mark Complete", key=f"comp_{po['po_id']}", type="primary"):
+                        # 3. NEW: Allow forceful PO completion that auto-receives remaining items
+                        if po_items:
+                            btn_label = "✅ Mark Complete" if all_received else "✅ Receive Remaining & Mark PO Complete"
+                            if st.button(btn_label, key=f"comp_{po['po_id']}", type="primary"):
+                                for item in po_items:
+                                    ord_qty = float(item.get("quantity", 0))
+                                    rec_qty = float(item.get("quantity_received", 0))
+                                    rem = ord_qty - rec_qty
+                                    
+                                    if rem > 0 and not item.get("received", False):
+                                        receive_to_inventory(
+                                            item.get("description", ""),
+                                            item.get("category", "Received"),
+                                            item.get("sub_category", "PO Receipt"),
+                                            item.get("specification", ""),
+                                            rem, item.get("unit", "Kg"),
+                                            "Main Store", item.get("unit_price", 0),
+                                        )
+                                        update_po_item_receipt(po["po_id"], item["item_id"], ord_qty, True)
+                                        
                                 update_raw_material_po_status(po["po_id"], "Complete")
                                 st.rerun()
 
