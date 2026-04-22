@@ -237,38 +237,61 @@ def render():
                         # ─── EDITABLE: Receipt tracking ───────────────
                         all_received = True
                         for item in po_items:
-                            rc1, rc2, rc3, rc4, rc5 = st.columns([3, 1, 1, 1, 1])
+                            ordered = float(item.get("quantity", 0))
+                            already_received = float(item.get("quantity_received", 0))
+                            remaining = ordered - already_received
+                            is_item_done = item.get("received", False)
+
+                            rc1, rc2, rc3 = st.columns([4, 2, 2])
                             with rc1:
                                 st.markdown(f"**{item.get('description', '')}**")
                                 st.caption(item.get("specification", ""))
                             with rc2:
-                                st.caption(f"Ord: {item.get('quantity', 0)} {item.get('unit', '')}")
+                                st.caption(f"Ordered: {ordered} {item.get('unit', '')}")
+                                st.caption(f"Already received: {already_received}")
+                                st.caption(f"Remaining: {remaining}")
                             with rc3:
-                                st.caption(f"Rcvd: {item.get('quantity_received', 0)}")
-                            with rc4:
-                                qr = st.number_input("Recv", min_value=0.0, max_value=float(item.get("quantity", 0)),
-                                    value=float(item.get("quantity_received", 0)), step=1.0,
-                                    key=f"rv_{po['po_id']}_{item['item_id']}", label_visibility="collapsed")
-                            with rc5:
-                                ir = st.checkbox("✅", value=item.get("received", False),
-                                    key=f"ck_{po['po_id']}_{item['item_id']}")
-                            if not ir:
-                                all_received = False
-                            if qr != item.get("quantity_received", 0) or ir != item.get("received", False):
-                                if st.button("Save", key=f"sv_{po['po_id']}_{item['item_id']}"):
-                                    update_po_item_receipt(po["po_id"], item["item_id"], qr, ir)
-                                    if ir and qr > 0:
-                                        # Aggregate into inventory (vendor-agnostic)
+                                if is_item_done:
+                                    st.success(f"✅ Fully received ({already_received})")
+                                else:
+                                    all_received = False
+
+                            if not is_item_done and remaining > 0:
+                                with st.form(key=f"recv_form_{po['po_id']}_{item['item_id']}"):
+                                    fc1, fc2, fc3 = st.columns([2, 1, 1])
+                                    with fc1:
+                                        recv_now = st.number_input(
+                                            "Receiving now", min_value=0.0, max_value=remaining,
+                                            value=0.0, step=1.0,
+                                            key=f"rn_{po['po_id']}_{item['item_id']}")
+                                    with fc2:
+                                        mark_complete = st.checkbox(
+                                            "Mark fully received",
+                                            key=f"mc_{po['po_id']}_{item['item_id']}")
+                                    with fc3:
+                                        submitted = st.form_submit_button("💾 Receive")
+
+                                    if submitted and recv_now > 0:
+                                        new_total = already_received + recv_now
+                                        is_done = mark_complete or (new_total >= ordered)
+                                        update_po_item_receipt(po["po_id"], item["item_id"], new_total, is_done)
+                                        # Add only what was received NOW to inventory
                                         receive_to_inventory(
                                             item.get("description", ""),
                                             item.get("category", "Received"),
                                             item.get("sub_category", "PO Receipt"),
                                             item.get("specification", ""),
-                                            qr, item.get("unit", "Kg"),
+                                            recv_now, item.get("unit", "Kg"),
                                             "Main Store", item.get("unit_price", 0),
                                         )
-                                    st.success("Updated & stock adjusted!")
-                                    st.rerun()
+                                        st.success(f"Received {recv_now} — total now {new_total}/{ordered}")
+                                        st.rerun()
+                                    elif submitted and recv_now == 0 and mark_complete:
+                                        update_po_item_receipt(po["po_id"], item["item_id"], already_received, True)
+                                        st.success("Marked as fully received")
+                                        st.rerun()
+
+                            st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
 
                         if all_received and po_items:
                             if st.button("✅ Mark Complete", key=f"comp_{po['po_id']}", type="primary"):
