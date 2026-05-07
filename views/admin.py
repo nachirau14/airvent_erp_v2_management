@@ -1,6 +1,7 @@
-"""Admin — Bulk delete for rapid prototyping. Handle with care."""
+"""Admin — Company config, logo upload, bulk delete."""
 import streamlit as st
-from utils.db import bulk_delete_table_data, reset_counter, _scan_all
+from utils.db import (bulk_delete_table_data, reset_counter, _scan_all,
+                       _get_company_config, save_company_config, upload_company_logo, _get_logo_bytes)
 from utils.ui_helpers import section_header, styled_metric
 from config import TABLES
 
@@ -23,15 +24,66 @@ TABLE_LABELS = {
     "material_issues": "📦 Material Issues",
     "order_staging": "🚀 Order Staging",
     "email_config": "📧 Email Config",
+    "scrap_inventory": "♻️ Scrap Inventory",
+    "company_config": "🏢 Company Config",
 }
 
 
 def render():
-    st.markdown("# 🛡️ Admin — Bulk Delete")
-    st.markdown("*⚠️ Permanently delete all data from selected tables. Use for rapid prototyping only.*")
+    st.markdown("# 🛡️ Admin")
+    st.markdown("*Company setup, logo, and data management*")
     st.markdown("---")
 
-    st.error("**WARNING:** Deleting data is irreversible. This will permanently remove ALL records from the selected tables.")
+    tab_company, tab_delete, tab_counters = st.tabs(["🏢 Company Config", "🗑️ Bulk Delete", "🔄 Counters"])
+
+    # ─── Company Config ───────────────────────────────────────
+    with tab_company:
+        section_header("Company Configuration", "🏢")
+        st.markdown("*These details appear on all POs, Service POs, and Delivery Challans*")
+
+        config = _get_company_config()
+
+        with st.form("company_config"):
+            c1, c2 = st.columns(2)
+            with c1:
+                company_name = st.text_input("Company Name *", value=config.get("company_name", ""))
+                gstin = st.text_input("GSTIN *", value=config.get("gstin", ""))
+            with c2:
+                address = st.text_area("Registered Address *", value=config.get("address", ""), height=80)
+                shipping_address = st.text_area("Shipping Address", value=config.get("shipping_address", ""), height=80)
+
+            if st.form_submit_button("💾 Save Company Details", use_container_width=True):
+                save_company_config({
+                    "company_name": company_name, "gstin": gstin,
+                    "address": address, "shipping_address": shipping_address,
+                    "logo_s3_key": config.get("logo_s3_key", ""),
+                })
+                st.success("Company details saved!")
+                st.rerun()
+
+        st.markdown("---")
+        section_header("Company Logo", "🖼️")
+        st.markdown("*Upload your company logo (PNG/JPG). It will appear on all generated PDFs.*")
+
+        # Show current logo
+        logo_bytes = _get_logo_bytes()
+        if logo_bytes:
+            st.image(logo_bytes, width=200, caption="Current logo")
+        else:
+            st.info("No logo uploaded yet.")
+
+        logo_file = st.file_uploader("Upload logo (PNG or JPG)", type=["png", "jpg", "jpeg"], key="logo_upload")
+        if logo_file:
+            if st.button("📤 Upload Logo", type="primary"):
+                result = upload_company_logo(logo_file.read(), logo_file.name)
+                if result:
+                    st.success("Logo uploaded!")
+                    st.rerun()
+                else:
+                    st.error("Upload failed")
+
+    # ─── Bulk Delete ──────────────────────────────────────────
+    with tab_delete:
 
     section_header("Table Status", "📊")
 
@@ -104,7 +156,9 @@ def render():
     st.markdown("---")
 
     # Reset counters
-    section_header("Reset Sequential Counters", "🔄")
+    # ─── Counters ──────────────────────────────────────────────
+    with tab_counters:
+        section_header("Reset Sequential Counters", "🔄")
     st.markdown("Reset MI/RMPO/SPO counters back to 0. New items will start from 0001 again.")
 
     rc1, rc2, rc3 = st.columns(3)

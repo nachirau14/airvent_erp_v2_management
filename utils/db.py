@@ -156,6 +156,8 @@ def bulk_delete_table_data(table_key):
         "material_issues": ["issue_id"],
         "order_staging": ["stage_id"],
         "email_config": ["config_id"],
+        "scrap_inventory": ["item_id"],
+        "company_config": ["config_id"],
     }
     if table_key not in TABLES:
         return 0
@@ -178,73 +180,359 @@ def reset_counter(counter_name):
 # ═══════════════════════════════════════════════════════════════════
 #  S3 — PDF Generation & Attachments
 # ═══════════════════════════════════════════════════════════════════
+def _get_company_config():
+    """Get company config (name, address, GSTIN, logo S3 key)."""
+    try:
+        db = get_dynamodb()
+        table = db.Table(TABLES.get("company_config", "erp_company_config"))
+        resp = table.get_item(Key={"config_id": "main"})
+        item = resp.get("Item")
+        if item:
+            return _from_decimal(item)
+    except Exception:
+        pass
+    return {
+        "config_id": "main",
+        "company_name": "YOUR COMPANY NAME",
+        "address": "Your Address",
+        "gstin": "XXXXXXXXXXXX",
+        "logo_s3_key": "",
+        "shipping_address": "Your Shipping Address",
+    }
+
+
+def save_company_config(config):
+    db = get_dynamodb()
+    table = db.Table(TABLES.get("company_config", "erp_company_config"))
+    config["config_id"] = "main"
+    config["updated_at"] = _now()
+    table.put_item(Item=config)
+
+
+def upload_company_logo(file_bytes, file_name):
+    """Upload company logo to S3 and save the key."""
+    s3_key = f"config/logo/{file_name}"
+    try:
+        s3 = get_s3_client()
+        s3.put_object(Bucket=S3_ATTACHMENTS_BUCKET, Key=s3_key, Body=file_bytes, ContentType="image/png")
+        cfg = _get_company_config()
+        cfg["logo_s3_key"] = s3_key
+        save_company_config(cfg)
+        return s3_key
+    except Exception as e:
+        return None
+
+
+def _get_logo_bytes():
+    """Download logo from S3 for PDF embedding."""
+    cfg = _get_company_config()
+    key = cfg.get("logo_s3_key", "")
+    if not key:
+        return None
+    try:
+        s3 = get_s3_client()
+        resp = s3.get_object(Bucket=S3_ATTACHMENTS_BUCKET, Key=key)
+        return resp["Body"].read()
+    except Exception:
+        return None
+
+
 def generate_po_pdf(po_data, po_items, po_type="Material"):
-    """Generate a simple PDF for a PO and upload to S3. Returns the S3 key."""
+    """Generate a professional PO PDF matching the Airvent format."""
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.units import mm
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib import colors
+        from reportlab.lib.enums import TA_RIGHT, TA_CENTER, TA_LEFT
     except ImportError:
         return None
 
+    company = _get_company_config()
+    vendor_name = po_data.get("vendor_name", "")
+    # Try to get vendor details
+    vendors = get_all_vendors() if po_type == "Material" else get_all_service_vendors()
+    vendor_info = {}
+    for v in vendors:
+        if v.get("name", "").lower() == vendor_name.lower() or v.get("vendor_id") == po_data.get("vendor_id"):
+            vendor_info = v
+            break
+
+    po_id = po_data.get("po_id", "")
+    po_date = po_data.get("created_at", _today())[:10]
+    delivery_date = po_data.get("expected_delivery", "")
+    payment_terms = po_data.get("payment_terms", "")
+
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20*mm, bottomMargin=20*mm)
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
+                             leftMargin=12*mm, rightMargin=12*mm)
     styles = getSampleStyleSheet()
+    small = ParagraphStyle("Small", parent=styles["Normal"], fontSize=7, leading=9)
+    small_bold = ParagraphStyle("SmallBold", parent=small, fontName="Helvetica-Bold")
+    header_style = ParagraphStyle("Header", parent=styles["Normal"], fontSize=8, leading=10)
+    title_style = ParagraphStyle("POTitle", fontSize=16, fontName="Helvetica-Bold", alignment=TA_RIGHT)
+    subtitle = ParagraphStyle("Subtitle", fontSize=11, fontName="Helvetica-Bold", alignment=TA_RIGHT)
+
     elements = []
 
-    # Header
-    elements.append(Paragraph(f"<b>PURCHASE ORDER</b>", styles["Title"]))
-    elements.append(Spacer(1, 5*mm))
-    po_id = po_data.get("po_id", "")
-    elements.append(Paragraph(f"<b>PO Number:</b> {po_id}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Type:</b> {po_type}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Vendor:</b> {po_data.get('vendor_name', '')}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Payment Terms:</b> {po_data.get('payment_terms', '')}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Expected Delivery:</b> {po_data.get('expected_delivery', '')}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Date:</b> {_today()}", styles["Normal"]))
-    elements.append(Spacer(1, 8*mm))
+    # ─── Header: Logo + PO Title ──────────────────────────────
+    logo_bytes = _get_logo_bytes()
+    header_data = []
+    if logo_bytes:
+        logo_buf = io.BytesIO(logo_bytes)
+        try:
+            logo_img = Image(logo_buf, width=50*mm, height=15*mm)
+            logo_img.hAlign = "LEFT"
+        except Exception:
+            logo_img = Paragraph(f"<b>{company.get('company_name', '')}</b>", styles["Title"])
+        header_data = [[logo_img, "", Paragraph("Purchase Order", title_style)],
+                       ["", "", Paragraph(po_id, subtitle)]]
+    else:
+        header_data = [[Paragraph(f"<b>{company.get('company_name', '')}</b>", styles["Title"]),
+                         "", Paragraph("Purchase Order", title_style)],
+                       ["", "", Paragraph(po_id, subtitle)]]
 
-    # Items table
-    data = [["#", "Description", "Specification", "Qty", "Unit", "Rate (₹)", "Amount (₹)"]]
+    ht = Table(header_data, colWidths=[70*mm, 30*mm, 80*mm])
+    ht.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                             ("LINEBELOW", (0, -1), (-1, -1), 1, colors.black)]))
+    elements.append(ht)
+    elements.append(Spacer(1, 4*mm))
+
+    # ─── Address Block: Buyer | Supplier | Shipping ───────────
+    buyer_text = f"""<b>Name and Address of Buyer</b><br/>
+    <b>{company.get('company_name', '')}</b><br/>
+    {company.get('address', '')}<br/>
+    GSTIN: {company.get('gstin', '')}"""
+
+    supplier_text = f"""<b>Name and Address of Supplier</b><br/>
+    <b>{vendor_name}</b><br/>
+    {vendor_info.get('address', '')}<br/>
+    GSTIN: {vendor_info.get('gst_no', '')}"""
+
+    shipping_text = f"""<b>Shipping Details</b><br/>
+    {company.get('shipping_address', company.get('address', ''))}<br/>
+    GSTIN: {company.get('gstin', '')}"""
+
+    addr_table = Table([
+        [Paragraph(buyer_text, small), Paragraph(supplier_text, small), Paragraph(shipping_text, small)]
+    ], colWidths=[60*mm, 60*mm, 60*mm])
+    addr_table.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.black),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    elements.append(addr_table)
+    elements.append(Spacer(1, 4*mm))
+
+    # ─── PO Details Block ─────────────────────────────────────
+    num_items = len(po_items)
+    total_amount = sum(i.get("quantity", 0) * i.get("unit_price", i.get("rate", 0)) for i in po_items)
+
+    details_data = [
+        [Paragraph("<b>PO Number</b>", small), Paragraph(po_id, small),
+         Paragraph("<b>PO Date</b>", small), Paragraph(po_date, small)],
+        [Paragraph("<b>Delivery Date</b>", small), Paragraph(str(delivery_date), small),
+         Paragraph("<b>PO Amendment</b>", small), Paragraph("0", small)],
+        [Paragraph("<b>No of Items</b>", small), Paragraph(str(num_items), small),
+         Paragraph("<b>PO Amount</b>", small), Paragraph(f"₹{total_amount:,.2f}", small)],
+        [Paragraph("<b>Payment Terms</b>", small), Paragraph(payment_terms, small), "", ""],
+    ]
+    dt = Table(details_data, colWidths=[35*mm, 55*mm, 35*mm, 55*mm])
+    dt.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.black),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("SPAN", (0, 0), (0, 0)),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    elements.append(Paragraph("<b>PO Details</b>", ParagraphStyle("PDT", fontSize=10, fontName="Helvetica-Bold", alignment=TA_CENTER)))
+    elements.append(dt)
+    elements.append(Spacer(1, 4*mm))
+
+    # ─── Items Table ──────────────────────────────────────────
+    col_widths = [8*mm, 55*mm, 20*mm, 20*mm, 25*mm, 25*mm, 25*mm]
+    item_header = [
+        Paragraph("<b>#</b>", small), Paragraph("<b>Description</b>", small),
+        Paragraph("<b>HSN/SAC</b>", small), Paragraph("<b>Quantity</b>", small),
+        Paragraph("<b>Rate</b>", small), Paragraph("<b>Taxable Amount</b>", small),
+        Paragraph("<b>Total</b>", small),
+    ]
+    item_data = [item_header]
+
     for idx, item in enumerate(po_items, 1):
         qty = item.get("quantity", 0)
         rate = item.get("unit_price", item.get("rate", 0))
-        data.append([str(idx), item.get("description", ""), item.get("specification", ""),
-                      str(qty), item.get("unit", ""), f"{rate:,.2f}", f"{qty * rate:,.2f}"])
+        taxable = qty * rate
+        desc_text = f"{item.get('description', '')}"
+        if item.get("specification"):
+            desc_text += f"<br/><font size='6'>Details: {item.get('specification', '')}</font>"
+        item_data.append([
+            Paragraph(str(idx), small),
+            Paragraph(desc_text, small),
+            Paragraph(item.get("hsn_code", ""), small),
+            Paragraph(f"{qty} {item.get('unit', '')}", small),
+            Paragraph(f"₹{rate:,.2f}", small),
+            Paragraph(f"₹{taxable:,.2f}", small),
+            Paragraph(f"₹{taxable:,.2f}", small),
+        ])
 
-    total = sum(i.get("quantity", 0) * i.get("unit_price", i.get("rate", 0)) for i in po_items)
-    data.append(["", "", "", "", "", "Total", f"{total:,.2f}"])
+    # Total row
+    item_data.append([
+        "", "", "", "", "",
+        Paragraph("<b>Total (before Tax)</b>", small_bold),
+        Paragraph(f"<b>₹{total_amount:,.2f}</b>", small_bold),
+    ])
 
-    t = Table(data, repeatRows=1)
-    t.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e40af")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+    it = Table(item_data, colWidths=col_widths, repeatRows=1)
+    it.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.black),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
-        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#f1f5f9")),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
     ]))
-    elements.append(t)
-    elements.append(Spacer(1, 10*mm))
+    elements.append(it)
+    elements.append(Spacer(1, 6*mm))
+
+    # Notes
     if po_data.get("notes"):
-        elements.append(Paragraph(f"<b>Notes:</b> {po_data['notes']}", styles["Normal"]))
+        elements.append(Paragraph(f"<b>Notes:</b> {po_data['notes']}", small))
+        elements.append(Spacer(1, 4*mm))
+
+    # T&C + Signature
+    elements.append(Paragraph("<b>Terms And Conditions:</b>", small_bold))
+    elements.append(Paragraph("This is a computer generated document", small))
+    elements.append(Spacer(1, 10*mm))
+    sig_table = Table([["", Paragraph(f"For <b>{company.get('company_name', '')}</b><br/><br/><br/>Authorised Signatory",
+                        ParagraphStyle("Sig", fontSize=8, alignment=TA_CENTER))]],
+                       colWidths=[100*mm, 80*mm])
+    elements.append(sig_table)
 
     doc.build(elements)
     buf.seek(0)
 
-    # Upload to S3
     s3_key = f"po/{po_type.lower()}/{_today()}/{po_id}.pdf"
     try:
         s3 = get_s3_client()
-        s3.put_object(Bucket=S3_PO_PDF_BUCKET, Key=s3_key, Body=buf.getvalue(),
-                       ContentType="application/pdf")
+        s3.put_object(Bucket=S3_PO_PDF_BUCKET, Key=s3_key, Body=buf.getvalue(), ContentType="application/pdf")
         return s3_key
     except Exception as e:
         st.warning(f"S3 upload failed: {e}")
+        return None
+
+
+def generate_delivery_challan(po_data, po_items, challan_number=None):
+    """Generate a Delivery Challan PDF for sending material to service vendor."""
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import mm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_RIGHT, TA_CENTER
+    except ImportError:
+        return None
+
+    company = _get_company_config()
+    po_id = po_data.get("po_id", "")
+    if not challan_number:
+        challan_number = f"DC-{po_id}"
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
+                             leftMargin=12*mm, rightMargin=12*mm)
+    styles = getSampleStyleSheet()
+    small = ParagraphStyle("Small", parent=styles["Normal"], fontSize=8, leading=10)
+    small_bold = ParagraphStyle("SmallBold", parent=small, fontName="Helvetica-Bold")
+
+    elements = []
+
+    # Header
+    logo_bytes = _get_logo_bytes()
+    title_style = ParagraphStyle("DCTitle", fontSize=16, fontName="Helvetica-Bold", alignment=TA_RIGHT)
+    if logo_bytes:
+        logo_buf = io.BytesIO(logo_bytes)
+        try:
+            logo_img = Image(logo_buf, width=50*mm, height=15*mm)
+        except Exception:
+            logo_img = Paragraph(f"<b>{company.get('company_name', '')}</b>", styles["Title"])
+        ht = Table([[logo_img, Paragraph("Delivery Challan", title_style)]], colWidths=[90*mm, 90*mm])
+    else:
+        ht = Table([[Paragraph(f"<b>{company.get('company_name', '')}</b>", styles["Title"]),
+                      Paragraph("Delivery Challan", title_style)]], colWidths=[90*mm, 90*mm])
+    ht.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                             ("LINEBELOW", (0, -1), (-1, -1), 1, colors.black)]))
+    elements.append(ht)
+    elements.append(Spacer(1, 4*mm))
+
+    # Details
+    details = [
+        [Paragraph("<b>Challan No:</b>", small), Paragraph(challan_number, small),
+         Paragraph("<b>Date:</b>", small), Paragraph(_today(), small)],
+        [Paragraph("<b>PO Reference:</b>", small), Paragraph(po_id, small),
+         Paragraph("<b>Vendor:</b>", small), Paragraph(po_data.get("vendor_name", ""), small)],
+        [Paragraph("<b>From:</b>", small), Paragraph(company.get("address", ""), small),
+         Paragraph("<b>To:</b>", small), Paragraph(po_data.get("vendor_address", ""), small)],
+    ]
+    dt = Table(details, colWidths=[25*mm, 65*mm, 25*mm, 65*mm])
+    dt.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.5, colors.black),
+                             ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                             ("TOPPADDING", (0, 0), (-1, -1), 3),
+                             ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
+    elements.append(dt)
+    elements.append(Spacer(1, 4*mm))
+
+    # Items
+    item_header = [Paragraph("<b>Sl No</b>", small_bold), Paragraph("<b>Item Name</b>", small_bold),
+                    Paragraph("<b>HSN Code</b>", small_bold), Paragraph("<b>Quantity</b>", small_bold),
+                    Paragraph("<b>Unit</b>", small_bold)]
+    item_data = [item_header]
+    for idx, item in enumerate(po_items, 1):
+        item_data.append([
+            Paragraph(str(idx), small),
+            Paragraph(item.get("description", item.get("item_name", "")), small),
+            Paragraph(item.get("hsn_code", ""), small),
+            Paragraph(str(item.get("quantity", 0)), small),
+            Paragraph(item.get("unit", ""), small),
+        ])
+
+    it = Table(item_data, colWidths=[15*mm, 80*mm, 25*mm, 25*mm, 25*mm], repeatRows=1)
+    it.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.black),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    elements.append(it)
+    elements.append(Spacer(1, 10*mm))
+
+    # Signatures
+    sig = Table([
+        [Paragraph("Prepared By: ________________", small),
+         Paragraph("Received By: ________________", small)],
+        [Paragraph(f"\n\nFor <b>{company.get('company_name', '')}</b>", small), ""],
+    ], colWidths=[90*mm, 90*mm])
+    elements.append(sig)
+
+    doc.build(elements)
+    buf.seek(0)
+
+    s3_key = f"challans/{_today()}/{challan_number}.pdf"
+    try:
+        s3 = get_s3_client()
+        s3.put_object(Bucket=S3_PO_PDF_BUCKET, Key=s3_key, Body=buf.getvalue(), ContentType="application/pdf")
+        return s3_key
+    except Exception:
         return None
 
 
@@ -1160,3 +1448,59 @@ def get_dispatched_goods(project_id=None):
         resp = table.scan(FilterExpression=Attr("project_id").eq(project_id))
         return [_from_decimal(i) for i in resp.get("Items", [])]
     return _scan_all(TABLES["dispatched_goods"])
+
+# ═══════════════════════════════════════════════════════════════════
+#  SCRAP INVENTORY
+# ═══════════════════════════════════════════════════════════════════
+def add_scrap_item(item_name, category, specification, quantity, unit, source_po="", notes=""):
+    db = get_dynamodb()
+    table = db.Table(TABLES["scrap_inventory"])
+    item = _to_decimal({
+        "item_id": _gen_id("SCR-"), "item_name": item_name, "category": category,
+        "specification": specification, "quantity": quantity, "unit": unit,
+        "source_po": source_po, "notes": notes, "added_at": _now(),
+    })
+    table.put_item(Item=item)
+    return _from_decimal(item)
+
+def get_all_scrap():
+    return _scan_all(TABLES["scrap_inventory"])
+
+def update_scrap_qty(item_id, quantity_change):
+    db = get_dynamodb()
+    table = db.Table(TABLES["scrap_inventory"])
+    table.update_item(Key={"item_id": item_id},
+        UpdateExpression="SET quantity = quantity + :q",
+        ExpressionAttributeValues={":q": Decimal(str(quantity_change))})
+
+def delete_scrap_item(item_id):
+    db = get_dynamodb()
+    table = db.Table(TABLES["scrap_inventory"])
+    table.delete_item(Key={"item_id": item_id})
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  SERVICE PO — Inventory Linkage (issue material to service vendor)
+# ═══════════════════════════════════════════════════════════════════
+def issue_material_to_service_vendor(po_id, inventory_items):
+    """Deduct material from raw inventory for a service PO.
+    inventory_items = [{"item_id": "INV-xxx", "item_name": "...", "quantity": 10, "unit": "Kg"}, ...]"""
+    for it in inventory_items:
+        update_inventory_qty(it["item_id"], -it["quantity"])
+    # Store what was issued on the PO record
+    db = get_dynamodb()
+    table = db.Table(TABLES["service_po"])
+    table.update_item(Key={"po_id": po_id},
+        UpdateExpression="SET issued_material = :im, updated_at = :u",
+        ExpressionAttributeValues={":im": _to_decimal(inventory_items), ":u": _now()})
+
+
+def receive_scrap_from_service(po_id, scrap_items):
+    """Receive scrap back from service vendor. Adds to scrap inventory.
+    scrap_items = [{"item_name": "...", "quantity": 5, "unit": "Kg", "notes": "offcuts"}, ...]"""
+    for item in scrap_items:
+        add_scrap_item(
+            item.get("item_name", ""), item.get("category", "Scrap"),
+            item.get("specification", ""), item.get("quantity", 0),
+            item.get("unit", "Kg"), po_id, item.get("notes", ""),
+        )
