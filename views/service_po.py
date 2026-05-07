@@ -250,28 +250,60 @@ def render():
                     if pb:
                         st.download_button("📄 Download Service PO PDF", pb, f"{po['po_id']}.pdf",
                             "application/pdf", key=f"spdf_{po['po_id']}")
+                elif status in ("Placed", "In Progress"):
+                    if st.button("📄 Generate Service PO PDF", key=f"sgpdf_{po['po_id']}"):
+                        pi = get_service_po_items(po["po_id"])
+                        pk = generate_po_pdf(po, pi, "Service")
+                        if pk:
+                            update_po_pdf_key(po["po_id"], pk, "service_po")
+                            st.success("PDF generated!")
+                            st.rerun()
 
-                # Delivery Challan
-                if issued and status in ("Placed", "In Progress", "Draft"):
-                    if st.button("🚚 Generate Delivery Challan", key=f"dc_{po['po_id']}"):
-                        challan_items = [{"description": m.get("item_name", ""), "item_name": m.get("item_name", ""),
-                                          "specification": m.get("specification", ""),
-                                          "quantity": m.get("quantity", 0), "unit": m.get("unit", ""),
-                                          "hsn_code": ""} for m in issued]
-                        po_with_addr = dict(po)
-                        # Get vendor address
-                        v = get_service_vendor(po.get("vendor_id", ""))
-                        if v:
-                            po_with_addr["vendor_address"] = v.get("address", "")
-                        dc_key = generate_delivery_challan(po_with_addr, challan_items)
-                        if dc_key:
-                            dc_bytes = get_po_pdf_download(dc_key)
-                            if dc_bytes:
-                                st.download_button("📄 Download Delivery Challan", dc_bytes,
-                                    f"DC-{po['po_id']}.pdf", "application/pdf", key=f"dcpdf_{po['po_id']}")
-                            st.success("Delivery Challan generated!")
+                # ─── Delivery Challan ─────────────────────────
+                if status in ("Placed", "In Progress", "Draft"):
+                    with st.expander("🚚 Delivery Challan"):
+                        if issued:
+                            st.markdown("**Material from this SPO:**")
+                            for m in issued:
+                                st.caption(f"• {m.get('item_name', '')} — {m.get('quantity', 0)} {m.get('unit', '')}")
+                            if st.button("📄 Generate Delivery Challan from Issued Material", key=f"dc_{po['po_id']}"):
+                                challan_items = [{"description": m.get("item_name", ""), "item_name": m.get("item_name", ""),
+                                                  "specification": m.get("specification", ""),
+                                                  "quantity": m.get("quantity", 0), "unit": m.get("unit", ""),
+                                                  "hsn_code": ""} for m in issued]
+                                po_with_addr = dict(po)
+                                v = get_service_vendor(po.get("vendor_id", ""))
+                                if v:
+                                    po_with_addr["vendor_address"] = v.get("address", "")
+                                dc_key = generate_delivery_challan(po_with_addr, challan_items)
+                                if dc_key:
+                                    dc_bytes = get_po_pdf_download(dc_key)
+                                    if dc_bytes:
+                                        st.download_button("⬇️ Download Delivery Challan", dc_bytes,
+                                            f"DC-{po['po_id']}.pdf", "application/pdf", key=f"dcpdf_{po['po_id']}")
+                                    st.success("Delivery Challan generated!")
                         else:
-                            st.error("Failed to generate challan")
+                            st.info("No material was issued from inventory for this SPO. You can generate a DC from the service line items instead.")
+                            po_items_for_dc = get_service_po_items(po["po_id"])
+                            if po_items_for_dc:
+                                if st.button("📄 Generate Delivery Challan from Service Items", key=f"dc2_{po['po_id']}"):
+                                    challan_items = [{"description": i.get("description", ""),
+                                                      "item_name": i.get("description", ""),
+                                                      "specification": i.get("specification", ""),
+                                                      "quantity": i.get("quantity", 0),
+                                                      "unit": i.get("unit", ""), "hsn_code": ""}
+                                                     for i in po_items_for_dc]
+                                    po_with_addr = dict(po)
+                                    v = get_service_vendor(po.get("vendor_id", ""))
+                                    if v:
+                                        po_with_addr["vendor_address"] = v.get("address", "")
+                                    dc_key = generate_delivery_challan(po_with_addr, challan_items)
+                                    if dc_key:
+                                        dc_bytes = get_po_pdf_download(dc_key)
+                                        if dc_bytes:
+                                            st.download_button("⬇️ Download Delivery Challan", dc_bytes,
+                                                f"DC-{po['po_id']}.pdf", "application/pdf", key=f"dcpdf2_{po['po_id']}")
+                                        st.success("Delivery Challan generated!")
 
                 # Attachments
                 st.markdown("**📎 Attachments**")
