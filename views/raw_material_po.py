@@ -1,7 +1,8 @@
-"""Purchase Orders — completed POs locked, inventory aggregated on receipt."""
+"""Purchase Orders — organized by month. Current month visible, older months collapsed."""
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
+from collections import defaultdict
 from utils.db import (
     get_all_projects, get_all_vendors, get_all_master_items,
     create_raw_material_po, get_all_raw_material_pos,
@@ -19,22 +20,170 @@ def _status_icon(status):
     return {"Draft": "⚪", "Placed": "🔵", "Partially Received": "🟡", "Complete": "🟢", "Cancelled": "🔴"}.get(status, "⚪")
 
 
-def _render_attachments(po_id):
-    st.markdown("**📎 Attachments**")
-    for ak in list_attachments(po_id):
-        ab = get_attachment(ak)
-        if ab:
-            st.download_button(f"⬇️ {ak.split('/')[-1]}", ab, ak.split("/")[-1], key=f"att_{ak}")
-    uploaded = st.file_uploader("Add attachment", key=f"up_{po_id}")
-    if uploaded and st.button("📤 Upload", key=f"upbtn_{po_id}"):
-        upload_attachment(po_id, uploaded.name, uploaded.read(), uploaded.type)
-        st.success(f"Attached {uploaded.name}")
-        st.rerun()
+def _get_month_key(po):
+    """Extract 'YYYY-MM' from created_at for grouping."""
+    created = po.get("created_at", "")
+    if created and len(created) >= 7:
+        return created[:7]  # "2026-05"
+    return "Unknown"
+
+
+def _month_label(month_key):
+    """Convert '2026-05' to 'May 2026'."""
+    try:
+        dt = datetime.strptime(month_key, "%Y-%m")
+        return dt.strftime("%B %Y")
+    except Exception:
+        return month_key
+
+
+def _render_po(po):
+    """Render a single PO expander with all controls."""
+    status = po.get("status", "Draft")
+    icon = _status_icon(status)
+    label = f"{icon} [{status}] {po['po_id']} — {po.get('vendor_name', '')} | {format_currency(po.get('total_amount', 0))}"
+    is_complete = status == "Complete"
+
+    with st.expander(label):
+        pc1, pc2, pc3 = st.columns(3)
+        with pc1:
+            st.markdown(f"**Vendor:** {po.get('vendor_name', '')}")
+            st.markdown(f"**Payment:** {po.get('payment_terms', '')}")
+        with pc2:
+            st.markdown(f"**Expected:** {po.get('expected_delivery', '')}")
+            st.markdown(f"**Created:** {po.get('created_at', '')[:10]}")
+        with pc3:
+            st.markdown(f"**Total:** {format_currency(po.get('total_amount', 0))}")
+            st.markdown(f"**Status:** {status}")
+
+        # PDF
+        pdf_key = po.get("pdf_key", "")
+        if pdf_key:
+            pdf_bytes = get_po_pdf_download(pdf_key)
+            if pdf_bytes:
+                st.download_button("📄 Download PO PDF", pdf_bytes, f"{po['po_id']}.pdf",
+                    "application/pdf", key=f"pdf_{po['po_id']}")
+        elif status == "Placed":
+            if st.button("📄 Generate PDF", key=f"genpdf_{po['po_id']}"):
+                po_items = get_raw_material_po_items(po["po_id"])
+                pk = generate_po_pdf(po, po_items, "Material")
+                if pk:
+                    update_po_pdf_key(po["po_id"], pk)
+                    st.success("PDF generated!")
+                    st.rerun()
+
+        # Attachments
+        st.markdown("**📎 Attachments**")
+        for ak in list_attachments(po["po_id"]):
+            ab = get_attachment(ak)
+            if ab:
+                st.download_button(f"⬇️ {ak.split('/')[-1]}", ab, ak.split("/")[-1], key=f"att_{ak}")
+        uploaded = st.file_uploader("Add attachment", key=f"up_{po['po_id']}")
+        if uploaded and st.button("📤 Upload", key=f"upbtn_{po['po_id']}"):
+            upload_attachment(po["po_id"], uploaded.name, uploaded.read(), uploaded.type)
+            st.success(f"Attached {uploaded.name}")
+            st.rerun()
+
+        st.markdown("---")
+        po_items = get_raw_material_po_items(po["po_id"])
+        if po_items:
+            if is_complete:
+                st.success("✅ This PO is complete. All items received.")
+                for item in po_items:
+                    rc1, rc2, rc3 = st.columns([4, 1, 1])
+                    with rc1:
+                        st.markdown(f"**{item.get('description', '')}** — {item.get('specification', '')}")
+                    with rc2:
+                        st.caption(f"Ordered: {item.get('quantity', 0)} {item.get('unit', '')}")
+                    with rc3:
+                        st.caption(f"Received: {item.get('quantity_received', 0)} ✅")
+
+                with st.expander("⚠️ Override — Mark as Incomplete"):
+                    st.warning("This will reopen the PO for editing.")
+                    confirm_text = st.text_input("Type **INCOMPLETE** to confirm", key=f"reopen_{po['po_id']}")
+                    if st.button("🔓 Reopen PO", key=f"reopen_btn_{po['po_id']}",
+                                 disabled=confirm_text.strip().upper() != "INCOMPLETE"):
+                        update_raw_material_po_status(po["po_id"], "Partially Received")
+                        st.success("PO reopened.")
+                        st.rerun()
+            else:
+                all_received = True
+                for item in po_items:
+                    ordered = float(item.get("quantity", 0))
+                    already_received = float(item.get("quantity_received", 0))
+                    remaining = ordered - already_received
+                    is_item_done = item.get("received", False)
+
+                    rc1, rc2, rc3 = st.columns([4, 2, 2])
+                    with rc1:
+                        st.markdown(f"**{item.get('description', '')}**")
+                        st.caption(item.get("specification", ""))
+                    with rc2:
+                        st.caption(f"Ordered: {ordered} {item.get('unit', '')}")
+                        st.caption(f"Already received: {already_received}")
+                        st.caption(f"Remaining: {remaining}")
+                    with rc3:
+                        if is_item_done:
+                            st.success(f"✅ Fully received ({already_received})")
+                        else:
+                            all_received = False
+
+                    if not is_item_done and remaining > 0:
+                        with st.form(key=f"recv_form_{po['po_id']}_{item['item_id']}"):
+                            fc1, fc2, fc3 = st.columns([2, 1, 1])
+                            with fc1:
+                                recv_now = st.number_input(
+                                    "Receiving now", min_value=0.0, max_value=remaining,
+                                    value=0.0, step=1.0,
+                                    key=f"rn_{po['po_id']}_{item['item_id']}")
+                            with fc2:
+                                mark_complete = st.checkbox(
+                                    "All received — close this item",
+                                    value=False,
+                                    key=f"mc_{po['po_id']}_{item['item_id']}")
+                            with fc3:
+                                submitted = st.form_submit_button("💾 Receive")
+
+                            if submitted and (recv_now > 0 or mark_complete):
+                                new_total = already_received + recv_now
+                                is_done = mark_complete
+                                update_po_item_receipt(po["po_id"], item["item_id"], new_total, is_done)
+                                if recv_now > 0:
+                                    receive_to_inventory(
+                                        item.get("description", ""),
+                                        item.get("category", "Received"),
+                                        item.get("sub_category", "PO Receipt"),
+                                        item.get("specification", ""),
+                                        recv_now, item.get("unit", "Kg"),
+                                        "Main Store", item.get("unit_price", 0),
+                                    )
+                                if is_done:
+                                    st.success(f"Item closed. Total received: {new_total}/{ordered}")
+                                else:
+                                    st.success(f"Received {recv_now}. Total now: {new_total}/{ordered}. Remaining: {ordered - new_total}")
+                                st.rerun()
+
+                    st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
+
+                if all_received and po_items:
+                    if st.button("✅ Mark Complete", key=f"comp_{po['po_id']}", type="primary"):
+                        update_raw_material_po_status(po["po_id"], "Complete")
+                        st.rerun()
+
+        if status == "Draft":
+            if st.button("📤 Place Order", key=f"pl_{po['po_id']}", type="primary"):
+                place_po_via_sqs(po["po_id"], "", po.get("vendor_name", ""), [], 0, "", "")
+                pi = get_raw_material_po_items(po["po_id"])
+                pk = generate_po_pdf(po, pi, "Material")
+                if pk:
+                    update_po_pdf_key(po["po_id"], pk)
+                st.success("Placed!")
+                st.rerun()
 
 
 def render():
     st.markdown("# 📦 Purchase Orders")
-    st.markdown("*Create, track, receive — completed POs are locked*")
+    st.markdown("*Current month shown. Older POs grouped by month.*")
     st.markdown("---")
 
     tab1, tab2 = st.tabs(["📋 All POs", "➕ Create PO"])
@@ -166,145 +315,43 @@ def render():
                     st.session_state.po_items = []
                     st.rerun()
 
-    # ─── All POs ──────────────────────────────────────────────
+    # ─── All POs — grouped by month ──────────────────────────
     with tab1:
         all_pos = get_all_raw_material_pos()
         if not all_pos:
             empty_state("📦", "No purchase orders yet")
             return
 
-        for po in sorted(all_pos, key=lambda x: x.get("created_at", ""), reverse=True):
-            status = po.get("status", "Draft")
-            icon = _status_icon(status)
-            label = f"{icon} [{status}] {po['po_id']} — {po.get('vendor_name', '')} | {format_currency(po.get('total_amount', 0))}"
-            is_complete = status == "Complete"
+        # Group by month
+        current_month = datetime.utcnow().strftime("%Y-%m")
+        by_month = defaultdict(list)
+        for po in all_pos:
+            mk = _get_month_key(po)
+            by_month[mk].append(po)
 
-            with st.expander(label):
-                pc1, pc2, pc3 = st.columns(3)
-                with pc1:
-                    st.markdown(f"**Vendor:** {po.get('vendor_name', '')}")
-                    st.markdown(f"**Payment:** {po.get('payment_terms', '')}")
-                with pc2:
-                    st.markdown(f"**Expected:** {po.get('expected_delivery', '')}")
-                    st.markdown(f"**Created:** {po.get('created_at', '')[:10]}")
-                with pc3:
-                    st.markdown(f"**Total:** {format_currency(po.get('total_amount', 0))}")
-                    st.markdown(f"**Status:** {status}")
+        # Sort months descending
+        sorted_months = sorted(by_month.keys(), reverse=True)
 
-                # PDF Download
-                pdf_key = po.get("pdf_key", "")
-                if pdf_key:
-                    pdf_bytes = get_po_pdf_download(pdf_key)
-                    if pdf_bytes:
-                        st.download_button("📄 Download PO PDF", pdf_bytes, f"{po['po_id']}.pdf",
-                            "application/pdf", key=f"pdf_{po['po_id']}")
-                elif status == "Placed":
-                    if st.button("📄 Generate PDF", key=f"genpdf_{po['po_id']}"):
-                        po_items = get_raw_material_po_items(po["po_id"])
-                        pk = generate_po_pdf(po, po_items, "Material")
-                        if pk:
-                            update_po_pdf_key(po["po_id"], pk)
-                            st.success("PDF generated!")
-                            st.rerun()
+        # Summary
+        total_pos = len(all_pos)
+        current_count = len(by_month.get(current_month, []))
+        st.markdown(f"**{total_pos} total POs** | **{current_count} this month** | **{len(sorted_months)} months**")
+        st.markdown("---")
 
-                _render_attachments(po["po_id"])
+        for month_key in sorted_months:
+            month_pos = sorted(by_month[month_key], key=lambda x: x.get("created_at", ""), reverse=True)
+            label = _month_label(month_key)
+            count = len(month_pos)
+            month_total = sum(p.get("total_amount", 0) for p in month_pos)
+
+            if month_key == current_month:
+                # Current month — show directly, no folder
+                st.markdown(f"### 📅 {label} — {count} PO(s) — {format_currency(month_total)}")
+                for po in month_pos:
+                    _render_po(po)
                 st.markdown("---")
-
-                po_items = get_raw_material_po_items(po["po_id"])
-                if po_items:
-                    if is_complete:
-                        # ─── COMPLETE: Read-only view ─────────────────
-                        st.success("✅ This PO is complete. All items received.")
-                        for item in po_items:
-                            rc1, rc2, rc3 = st.columns([4, 1, 1])
-                            with rc1:
-                                st.markdown(f"**{item.get('description', '')}** — {item.get('specification', '')}")
-                            with rc2:
-                                st.caption(f"Ordered: {item.get('quantity', 0)} {item.get('unit', '')}")
-                            with rc3:
-                                st.caption(f"Received: {item.get('quantity_received', 0)} ✅")
-
-                        # Override: reopen as incomplete
-                        with st.expander("⚠️ Override — Mark as Incomplete"):
-                            st.warning("This will reopen the PO for editing. Use only if it was marked complete by mistake.")
-                            confirm_text = st.text_input("Type **INCOMPLETE** to confirm", key=f"reopen_{po['po_id']}")
-                            if st.button("🔓 Reopen PO", key=f"reopen_btn_{po['po_id']}",
-                                         disabled=confirm_text.strip().upper() != "INCOMPLETE"):
-                                update_raw_material_po_status(po["po_id"], "Partially Received")
-                                st.success("PO reopened — you can now edit received quantities.")
-                                st.rerun()
-                    else:
-                        # ─── EDITABLE: Receipt tracking ───────────────
-                        all_received = True
-                        for item in po_items:
-                            ordered = float(item.get("quantity", 0))
-                            already_received = float(item.get("quantity_received", 0))
-                            remaining = ordered - already_received
-                            is_item_done = item.get("received", False)
-
-                            rc1, rc2, rc3 = st.columns([4, 2, 2])
-                            with rc1:
-                                st.markdown(f"**{item.get('description', '')}**")
-                                st.caption(item.get("specification", ""))
-                            with rc2:
-                                st.caption(f"Ordered: {ordered} {item.get('unit', '')}")
-                                st.caption(f"Already received: {already_received}")
-                                st.caption(f"Remaining: {remaining}")
-                            with rc3:
-                                if is_item_done:
-                                    st.success(f"✅ Fully received ({already_received})")
-                                else:
-                                    all_received = False
-
-                            if not is_item_done and remaining > 0:
-                                with st.form(key=f"recv_form_{po['po_id']}_{item['item_id']}"):
-                                    fc1, fc2, fc3 = st.columns([2, 1, 1])
-                                    with fc1:
-                                        recv_now = st.number_input(
-                                            "Receiving now", min_value=0.0, max_value=remaining,
-                                            value=0.0, step=1.0,
-                                            key=f"rn_{po['po_id']}_{item['item_id']}")
-                                    with fc2:
-                                        mark_complete = st.checkbox(
-                                            "All received — close this item",
-                                            value=False,
-                                            key=f"mc_{po['po_id']}_{item['item_id']}")
-                                    with fc3:
-                                        submitted = st.form_submit_button("💾 Receive")
-
-                                    if submitted and (recv_now > 0 or mark_complete):
-                                        new_total = already_received + recv_now
-                                        # ONLY mark done if user explicitly checks the box
-                                        is_done = mark_complete
-                                        update_po_item_receipt(po["po_id"], item["item_id"], new_total, is_done)
-                                        if recv_now > 0:
-                                            receive_to_inventory(
-                                                item.get("description", ""),
-                                                item.get("category", "Received"),
-                                                item.get("sub_category", "PO Receipt"),
-                                                item.get("specification", ""),
-                                                recv_now, item.get("unit", "Kg"),
-                                                "Main Store", item.get("unit_price", 0),
-                                            )
-                                        if is_done:
-                                            st.success(f"Item closed. Total received: {new_total}/{ordered}")
-                                        else:
-                                            st.success(f"Received {recv_now}. Total now: {new_total}/{ordered}. Remaining: {ordered - new_total}")
-                                        st.rerun()
-
-                            st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
-
-                        if all_received and po_items:
-                            if st.button("✅ Mark Complete", key=f"comp_{po['po_id']}", type="primary"):
-                                update_raw_material_po_status(po["po_id"], "Complete")
-                                st.rerun()
-
-                if status == "Draft":
-                    if st.button("📤 Place Order", key=f"pl_{po['po_id']}", type="primary"):
-                        place_po_via_sqs(po["po_id"], "", po.get("vendor_name", ""), [], 0, "", "")
-                        pi = get_raw_material_po_items(po["po_id"])
-                        pk = generate_po_pdf(po, pi, "Material")
-                        if pk:
-                            update_po_pdf_key(po["po_id"], pk)
-                        st.success("Placed!")
-                        st.rerun()
+            else:
+                # Older months — collapsed folder
+                with st.expander(f"📁 {label} — {count} PO(s) — {format_currency(month_total)}"):
+                    for po in month_pos:
+                        _render_po(po)

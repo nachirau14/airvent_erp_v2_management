@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
+from collections import defaultdict
 from utils.db import (
     get_all_projects, get_all_service_vendors, get_service_vendor,
     create_service_po, get_all_service_pos,
@@ -277,7 +278,7 @@ def render():
             st.info("Select material from inventory (Step 1) and/or add a service charge (Step 2) to proceed.")
 
     # ═══════════════════════════════════════════════════════════
-    #  ALL SERVICE POs
+    #  ALL SERVICE POs — grouped by month
     # ═══════════════════════════════════════════════════════════
     with tab1:
         all_pos = get_all_service_pos()
@@ -285,198 +286,213 @@ def render():
             empty_state("🛠️", "No service POs yet")
             return
 
-        for po in sorted(all_pos, key=lambda x: x.get("created_at", ""), reverse=True):
-            status = po.get("status", "Draft")
-            icon = _status_icon(status)
-            label = f"{icon} [{status}] {po['po_id']} — {po.get('vendor_name', '')} | {format_currency(po.get('total_amount', 0))}"
-            is_complete = status == "Complete"
+        current_month = datetime.utcnow().strftime("%Y-%m")
+        by_month = defaultdict(list)
+        for po in all_pos:
+            created = po.get("created_at", "")
+            mk = created[:7] if created and len(created) >= 7 else "Unknown"
+            by_month[mk].append(po)
 
-            with st.expander(label):
-                pc1, pc2, pc3 = st.columns(3)
-                with pc1:
-                    st.markdown(f"**Vendor:** {po.get('vendor_name', '')}")
-                    st.markdown(f"**Payment:** {po.get('payment_terms', '')}")
-                with pc2:
-                    st.markdown(f"**Expected:** {po.get('expected_delivery', '')}")
-                    st.markdown(f"**Status:** {status}")
-                with pc3:
-                    st.markdown(f"**Total:** {format_currency(po.get('total_amount', 0))}")
+        sorted_months = sorted(by_month.keys(), reverse=True)
+        total_pos = len(all_pos)
+        current_count = len(by_month.get(current_month, []))
+        st.markdown(f"**{total_pos} total SPOs** | **{current_count} this month** | **{len(sorted_months)} months**")
+        st.markdown("---")
 
-                # ─── Issued Material ──────────────────────────
-                issued = po.get("issued_material", [])
-                if issued:
-                    st.markdown("**📦 Material Sent to Vendor:**")
-                    for m in issued:
-                        st.caption(f"• {m.get('item_name', '')} — {m.get('quantity', 0)} {m.get('unit', '')} | {m.get('specification', '')}")
+        for month_key in sorted_months:
+            month_pos = sorted(by_month[month_key], key=lambda x: x.get("created_at", ""), reverse=True)
+            try:
+                mlabel = datetime.strptime(month_key, "%Y-%m").strftime("%B %Y")
+            except Exception:
+                mlabel = month_key
+            count = len(month_pos)
+            month_total = sum(p.get("total_amount", 0) for p in month_pos)
 
-                # ─── PDFs ─────────────────────────────────────
-                pdf_key = po.get("pdf_key", "")
-                if pdf_key:
-                    pb = get_po_pdf_download(pdf_key)
-                    if pb:
-                        st.download_button("📄 Download Service PO PDF", pb, f"{po['po_id']}.pdf",
-                            "application/pdf", key=f"spdf_{po['po_id']}")
-                elif status in ("Placed", "In Progress"):
-                    if st.button("📄 Generate Service PO PDF", key=f"sgpdf_{po['po_id']}"):
-                        pi = get_service_po_items(po["po_id"])
-                        pk = generate_po_pdf(po, pi, "Service")
-                        if pk:
-                            update_po_pdf_key(po["po_id"], pk, "service_po")
-                            st.success("PDF generated!")
-                            st.rerun()
+            if month_key == current_month:
+                st.markdown(f"### 📅 {mlabel} — {count} SPO(s) — {format_currency(month_total)}")
+                for po in month_pos:
+                    _render_spo(po)
+                st.markdown("---")
+            else:
+                with st.expander(f"📁 {mlabel} — {count} SPO(s) — {format_currency(month_total)}"):
+                    for po in month_pos:
+                        _render_spo(po)
 
-                # ─── Delivery Challan ─────────────────────────
-                if status in ("Placed", "In Progress", "Draft"):
-                    with st.expander("🚚 Delivery Challan"):
-                        if issued:
-                            st.markdown("**Material from this SPO:**")
-                            for m in issued:
-                                st.caption(f"• {m.get('item_name', '')} — {m.get('quantity', 0)} {m.get('unit', '')}")
-                            if st.button("📄 Generate Delivery Challan", key=f"dc_{po['po_id']}"):
-                                challan_items = [{"description": m.get("item_name", ""),
-                                                  "item_name": m.get("item_name", ""),
-                                                  "specification": m.get("specification", ""),
-                                                  "quantity": m.get("quantity", 0),
-                                                  "unit": m.get("unit", ""), "hsn_code": ""}
-                                                 for m in issued]
-                                po_with_addr = dict(po)
-                                v = get_service_vendor(po.get("vendor_id", ""))
-                                if v:
-                                    po_with_addr["vendor_address"] = v.get("address", "")
-                                dc_key = generate_delivery_challan(po_with_addr, challan_items)
-                                if dc_key:
-                                    dc_bytes = get_po_pdf_download(dc_key)
-                                    if dc_bytes:
-                                        st.download_button("⬇️ Download Delivery Challan", dc_bytes,
-                                            f"DC-{po['po_id']}.pdf", "application/pdf", key=f"dcpdf_{po['po_id']}")
-                                    st.success("Delivery Challan generated!")
-                        else:
-                            st.info("No material was issued from inventory. Generating DC from service items.")
-                            po_items_for_dc = get_service_po_items(po["po_id"])
-                            if po_items_for_dc and st.button("📄 Generate Delivery Challan", key=f"dc2_{po['po_id']}"):
-                                challan_items = [{"description": i.get("description", ""),
-                                                  "item_name": i.get("description", ""),
-                                                  "specification": i.get("specification", ""),
-                                                  "quantity": i.get("quantity", 0),
-                                                  "unit": i.get("unit", ""), "hsn_code": ""}
-                                                 for i in po_items_for_dc]
-                                po_with_addr = dict(po)
-                                v = get_service_vendor(po.get("vendor_id", ""))
-                                if v:
-                                    po_with_addr["vendor_address"] = v.get("address", "")
-                                dc_key = generate_delivery_challan(po_with_addr, challan_items)
-                                if dc_key:
-                                    dc_bytes = get_po_pdf_download(dc_key)
-                                    if dc_bytes:
-                                        st.download_button("⬇️ Download Delivery Challan", dc_bytes,
-                                            f"DC-{po['po_id']}.pdf", "application/pdf", key=f"dcpdf2_{po['po_id']}")
-                                    st.success("Delivery Challan generated!")
 
-                # Attachments
-                st.markdown("**📎 Attachments**")
-                for ak in list_attachments(po["po_id"]):
-                    ab = get_attachment(ak)
-                    if ab:
-                        st.download_button(f"⬇️ {ak.split('/')[-1]}", ab, ak.split("/")[-1], key=f"sa_{ak}")
-                uploaded = st.file_uploader("Upload attachment", key=f"sup_{po['po_id']}")
-                if uploaded and st.button("📤 Upload", key=f"subtn_{po['po_id']}"):
-                    upload_attachment(po["po_id"], uploaded.name, uploaded.read(), uploaded.type)
-                    st.success(f"Attached {uploaded.name}")
+def _render_spo(po):
+    """Render a single Service PO expander."""
+    status = po.get("status", "Draft")
+    icon = _status_icon(status)
+    label = f"{icon} [{status}] {po['po_id']} — {po.get('vendor_name', '')} | {format_currency(po.get('total_amount', 0))}"
+    is_complete = status == "Complete"
+
+    with st.expander(label):
+        pc1, pc2, pc3 = st.columns(3)
+        with pc1:
+            st.markdown(f"**Vendor:** {po.get('vendor_name', '')}")
+            st.markdown(f"**Payment:** {po.get('payment_terms', '')}")
+        with pc2:
+            st.markdown(f"**Expected:** {po.get('expected_delivery', '')}")
+            st.markdown(f"**Status:** {status}")
+        with pc3:
+            st.markdown(f"**Total:** {format_currency(po.get('total_amount', 0))}")
+
+        # Issued Material
+        issued = po.get("issued_material", [])
+        if issued:
+            st.markdown("**📦 Material Sent to Vendor:**")
+            for m in issued:
+                st.caption(f"• {m.get('item_name', '')} — {m.get('quantity', 0)} {m.get('unit', '')} | {m.get('specification', '')}")
+
+        # PDFs
+        pdf_key = po.get("pdf_key", "")
+        if pdf_key:
+            pb = get_po_pdf_download(pdf_key)
+            if pb:
+                st.download_button("📄 Download Service PO PDF", pb, f"{po['po_id']}.pdf",
+                    "application/pdf", key=f"spdf_{po['po_id']}")
+        elif status in ("Placed", "In Progress"):
+            if st.button("📄 Generate PDF", key=f"sgpdf_{po['po_id']}"):
+                pi = get_service_po_items(po["po_id"])
+                pk = generate_po_pdf(po, pi, "Service")
+                if pk:
+                    update_po_pdf_key(po["po_id"], pk, "service_po")
+                    st.success("PDF generated!")
                     st.rerun()
 
-                st.markdown("---")
-                po_items = get_service_po_items(po["po_id"])
+        # Delivery Challan
+        if status in ("Placed", "In Progress", "Draft"):
+            with st.expander("🚚 Delivery Challan"):
+                dc_items = issued if issued else []
+                if not dc_items:
+                    dc_items_raw = get_service_po_items(po["po_id"])
+                    dc_items = [{"item_name": i.get("description", ""), "specification": i.get("specification", ""),
+                                 "quantity": i.get("quantity", 0), "unit": i.get("unit", "")} for i in dc_items_raw]
 
-                if is_complete:
-                    st.success("✅ This Service PO is complete.")
-                    for item in po_items:
-                        st.markdown(f"**{item.get('description', '')}** — {item.get('specification', '')}")
-                        rc1, rc2, rc3 = st.columns(3)
-                        with rc1:
-                            st.caption(f"Ordered: {item.get('quantity', 0)} | Received: {item.get('quantity_received', 0)} ✅")
-                        with rc2:
-                            st.caption(f"Finishing: {item.get('finishing_status', '')} | {item.get('finishing_comment', '')}")
-                        with rc3:
-                            scrap = item.get("scrap_received", 0)
-                            if scrap:
-                                st.caption(f"Scrap: {scrap} {'(usable)' if item.get('scrap_usable') else ''}")
+                if dc_items:
+                    for m in dc_items:
+                        st.caption(f"• {m.get('item_name', '')} — {m.get('quantity', 0)} {m.get('unit', '')}")
+                    if st.button("📄 Generate Delivery Challan", key=f"dc_{po['po_id']}"):
+                        challan_items = [{"description": m.get("item_name", ""), "item_name": m.get("item_name", ""),
+                                          "specification": m.get("specification", ""),
+                                          "quantity": m.get("quantity", 0), "unit": m.get("unit", ""),
+                                          "hsn_code": ""} for m in dc_items]
+                        po_with_addr = dict(po)
+                        v = get_service_vendor(po.get("vendor_id", ""))
+                        if v:
+                            po_with_addr["vendor_address"] = v.get("address", "")
+                        dc_key = generate_delivery_challan(po_with_addr, challan_items)
+                        if dc_key:
+                            dc_bytes = get_po_pdf_download(dc_key)
+                            if dc_bytes:
+                                st.download_button("⬇️ Download Delivery Challan", dc_bytes,
+                                    f"DC-{po['po_id']}.pdf", "application/pdf", key=f"dcpdf_{po['po_id']}")
+                            st.success("Delivery Challan generated!")
 
-                    with st.expander("⚠️ Override — Mark as Incomplete"):
-                        st.warning("Reopen for editing if marked complete by mistake.")
-                        ct = st.text_input("Type INCOMPLETE to confirm", key=f"sro_{po['po_id']}")
-                        if st.button("🔓 Reopen", key=f"srob_{po['po_id']}",
-                                     disabled=ct.strip().upper() != "INCOMPLETE"):
-                            update_service_po_status(po["po_id"], "Partially Received")
-                            st.success("Reopened!")
-                            st.rerun()
+        # Attachments
+        st.markdown("**📎 Attachments**")
+        for ak in list_attachments(po["po_id"]):
+            ab = get_attachment(ak)
+            if ab:
+                st.download_button(f"⬇️ {ak.split('/')[-1]}", ab, ak.split("/")[-1], key=f"sa_{ak}")
+        uploaded = st.file_uploader("Upload attachment", key=f"sup_{po['po_id']}")
+        if uploaded and st.button("📤 Upload", key=f"subtn_{po['po_id']}"):
+            upload_attachment(po["po_id"], uploaded.name, uploaded.read(), uploaded.type)
+            st.success(f"Attached {uploaded.name}")
+            st.rerun()
+
+        st.markdown("---")
+        po_items = get_service_po_items(po["po_id"])
+
+        if is_complete:
+            st.success("✅ This Service PO is complete.")
+            for item in po_items:
+                st.markdown(f"**{item.get('description', '')}** — {item.get('specification', '')}")
+                rc1, rc2, rc3 = st.columns(3)
+                with rc1:
+                    st.caption(f"Ordered: {item.get('quantity', 0)} | Received: {item.get('quantity_received', 0)} ✅")
+                with rc2:
+                    st.caption(f"Finishing: {item.get('finishing_status', '')} | {item.get('finishing_comment', '')}")
+                with rc3:
+                    scrap = item.get("scrap_received", 0)
+                    if scrap:
+                        st.caption(f"Scrap: {scrap} {'(usable)' if item.get('scrap_usable') else ''}")
+
+            with st.expander("⚠️ Override — Mark as Incomplete"):
+                st.warning("Reopen for editing if marked complete by mistake.")
+                ct = st.text_input("Type INCOMPLETE to confirm", key=f"sro_{po['po_id']}")
+                if st.button("🔓 Reopen", key=f"srob_{po['po_id']}",
+                             disabled=ct.strip().upper() != "INCOMPLETE"):
+                    update_service_po_status(po["po_id"], "Partially Received")
+                    st.success("Reopened!")
+                    st.rerun()
+        else:
+            all_received = True
+            for item in po_items:
+                ordered = float(item.get("quantity", 0))
+                already = float(item.get("quantity_received", 0))
+                remaining = ordered - already
+                is_item_done = item.get("received", False)
+
+                st.markdown(f"**{item.get('description', '')}** — {item.get('specification', '')}")
+
+                if is_item_done:
+                    st.success(f"✅ Fully received ({already})")
                 else:
-                    all_received = True
-                    for item in po_items:
-                        ordered = float(item.get("quantity", 0))
-                        already = float(item.get("quantity_received", 0))
-                        remaining = ordered - already
-                        is_item_done = item.get("received", False)
+                    all_received = False
+                    rc1, rc2 = st.columns(2)
+                    with rc1:
+                        st.caption(f"Ordered: {ordered} | Received: {already} | Remaining: {remaining}")
+                        fs = st.selectbox("Finishing", FINISHING_STATUSES,
+                            index=FINISHING_STATUSES.index(item.get("finishing_status", "Pending"))
+                            if item.get("finishing_status") in FINISHING_STATUSES else 0,
+                            key=f"sfs_{po['po_id']}_{item['item_id']}")
+                        fc = st.text_area("Comment", value=item.get("finishing_comment", ""),
+                            height=60, key=f"sfc_{po['po_id']}_{item['item_id']}")
+                    with rc2:
+                        with st.form(key=f"srecv_{po['po_id']}_{item['item_id']}"):
+                            recv_now = st.number_input("Receiving now", min_value=0.0,
+                                max_value=remaining if remaining > 0 else 1.0, value=0.0, step=1.0,
+                                key=f"srn_{po['po_id']}_{item['item_id']}")
+                            mark_done = st.checkbox("All received — close this item",
+                                value=False, key=f"smd_{po['po_id']}_{item['item_id']}")
+                            st.markdown("**Scrap received:**")
+                            scr = st.number_input("Scrap Qty", min_value=0.0, step=0.5,
+                                key=f"scr_{po['po_id']}_{item['item_id']}")
+                            su = st.checkbox("Usable scrap?", key=f"ssu_{po['po_id']}_{item['item_id']}")
+                            sn = st.text_input("Scrap notes", key=f"ssn_{po['po_id']}_{item['item_id']}")
 
-                        st.markdown(f"**{item.get('description', '')}** — {item.get('specification', '')}")
+                            if st.form_submit_button("💾 Update"):
+                                new_total = already + recv_now
+                                is_done = mark_done
+                                update_service_po_item(po["po_id"], item["item_id"],
+                                    new_total, is_done, fs, fc, scr, su, sn)
+                                if scr > 0:
+                                    add_scrap_item(
+                                        item.get("description", ""), "Scrap",
+                                        item.get("specification", ""), scr,
+                                        item.get("unit", "Kg"), po["po_id"],
+                                        f"{'Usable' if su else 'Not usable'}: {sn}",
+                                    )
+                                if recv_now > 0:
+                                    st.success(f"Received {recv_now}. Total: {new_total}/{ordered}")
+                                else:
+                                    st.success("Updated!")
+                                st.rerun()
 
-                        if is_item_done:
-                            st.success(f"✅ Fully received ({already})")
-                        else:
-                            all_received = False
-                            rc1, rc2 = st.columns(2)
-                            with rc1:
-                                st.caption(f"Ordered: {ordered} | Received: {already} | Remaining: {remaining}")
-                                fs = st.selectbox("Finishing", FINISHING_STATUSES,
-                                    index=FINISHING_STATUSES.index(item.get("finishing_status", "Pending"))
-                                    if item.get("finishing_status") in FINISHING_STATUSES else 0,
-                                    key=f"sfs_{po['po_id']}_{item['item_id']}")
-                                fc = st.text_area("Comment", value=item.get("finishing_comment", ""),
-                                    height=60, key=f"sfc_{po['po_id']}_{item['item_id']}")
-                            with rc2:
-                                with st.form(key=f"srecv_{po['po_id']}_{item['item_id']}"):
-                                    recv_now = st.number_input("Receiving now", min_value=0.0,
-                                        max_value=remaining if remaining > 0 else 1.0, value=0.0, step=1.0,
-                                        key=f"srn_{po['po_id']}_{item['item_id']}")
-                                    mark_done = st.checkbox("All received — close this item",
-                                        value=False, key=f"smd_{po['po_id']}_{item['item_id']}")
+                st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
 
-                                    st.markdown("**Scrap received:**")
-                                    scr = st.number_input("Scrap Qty", min_value=0.0, step=0.5,
-                                        key=f"scr_{po['po_id']}_{item['item_id']}")
-                                    su = st.checkbox("Usable scrap?", key=f"ssu_{po['po_id']}_{item['item_id']}")
-                                    sn = st.text_input("Scrap notes", key=f"ssn_{po['po_id']}_{item['item_id']}")
+            if all_received and po_items:
+                if st.button("✅ Mark Complete", key=f"scomp_{po['po_id']}", type="primary"):
+                    update_service_po_status(po["po_id"], "Complete")
+                    st.rerun()
 
-                                    if st.form_submit_button("💾 Update"):
-                                        new_total = already + recv_now
-                                        is_done = mark_done
-                                        update_service_po_item(po["po_id"], item["item_id"],
-                                            new_total, is_done, fs, fc, scr, su, sn)
-                                        if scr > 0:
-                                            add_scrap_item(
-                                                item.get("description", ""), "Scrap",
-                                                item.get("specification", ""), scr,
-                                                item.get("unit", "Kg"), po["po_id"],
-                                                f"{'Usable' if su else 'Not usable'}: {sn}",
-                                            )
-                                        if recv_now > 0:
-                                            st.success(f"Received {recv_now}. Total: {new_total}/{ordered}")
-                                        else:
-                                            st.success("Updated!")
-                                        st.rerun()
-
-                        st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
-
-                    if all_received and po_items:
-                        if st.button("✅ Mark Complete", key=f"scomp_{po['po_id']}", type="primary"):
-                            update_service_po_status(po["po_id"], "Complete")
-                            st.rerun()
-
-                if status == "Draft":
-                    if st.button("📤 Place Order", key=f"spl_{po['po_id']}", type="primary"):
-                        place_service_po_via_sqs(po["po_id"], "", po.get("vendor_name", ""), [], 0, "", "")
-                        pi = get_service_po_items(po["po_id"])
-                        pk = generate_po_pdf(po, pi, "Service")
-                        if pk:
-                            update_po_pdf_key(po["po_id"], pk, "service_po")
-                        st.success("Placed!")
-                        st.rerun()
+        if status == "Draft":
+            if st.button("📤 Place Order", key=f"spl_{po['po_id']}", type="primary"):
+                place_service_po_via_sqs(po["po_id"], "", po.get("vendor_name", ""), [], 0, "", "")
+                pi = get_service_po_items(po["po_id"])
+                pk = generate_po_pdf(po, pi, "Service")
+                if pk:
+                    update_po_pdf_key(po["po_id"], pk, "service_po")
+                st.success("Placed!")
+                st.rerun()
