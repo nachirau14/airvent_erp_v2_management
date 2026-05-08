@@ -1,18 +1,18 @@
-"""Service POs — linked to inventory, delivery challans, scrap tracking."""
+"""Service POs — search inventory/scrap, service = description + rate, always saveable."""
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from utils.db import (
     get_all_projects, get_all_service_vendors, get_service_vendor,
-    get_service_vendor_services, create_service_po, get_all_service_pos,
+    create_service_po, get_all_service_pos,
     get_service_po_items, update_service_po_item, update_service_po_status,
     place_service_po_via_sqs, generate_po_pdf, update_po_pdf_key,
     get_po_pdf_download, upload_attachment, list_attachments, get_attachment,
-    get_all_inventory, issue_material_to_service_vendor,
-    generate_delivery_challan, add_scrap_item, get_raw_material_po,
+    get_all_inventory, get_all_scrap, issue_material_to_service_vendor,
+    generate_delivery_challan, add_scrap_item,
 )
 from utils.ui_helpers import section_header, format_currency, empty_state
-from config import PAYMENT_TERMS, UNITS_OF_MEASURE
+from config import PAYMENT_TERMS
 
 FINISHING_STATUSES = ["Pending", "Semi-Finished", "Complete"]
 
@@ -22,7 +22,7 @@ def _status_icon(s):
 
 def render():
     st.markdown("# 🛠️ Service Purchase Orders")
-    st.markdown("*Select material from inventory → send to service vendor → track finishing → receive scrap*")
+    st.markdown("*Search inventory/scrap → select material → add service charge → place order*")
     st.markdown("---")
 
     tab1, tab2 = st.tabs(["📋 All Service POs", "➕ Create Service PO"])
@@ -62,153 +62,219 @@ def render():
         st.markdown("**📎 Attach files**")
         new_spo_attachments = st.file_uploader("Choose files", accept_multiple_files=True, key="new_spo_att")
 
-        # ─── Step 1: Select material from inventory to send ───
+        # ─── Step 1: Search & select material ─────────────────
         st.markdown("---")
-        section_header("Step 1: Select Material from Inventory", "📦")
-        st.markdown("*Choose raw materials from your stock to send to the service vendor*")
-
-        inventory = get_all_inventory()
-        in_stock = [i for i in inventory if i.get("quantity", 0) > 0]
+        section_header("Step 1: Select Material to Send", "📦")
+        st.markdown("*Search your raw material inventory or scrap store. Only matching items are shown.*")
 
         if "spo_material" not in st.session_state:
             st.session_state.spo_material = []
 
-        if in_stock:
-            search = st.text_input("🔍 Search inventory", key="spo_inv_search")
-            filtered = in_stock
-            if search:
-                s = search.lower()
-                filtered = [i for i in filtered if s in i.get("item_name", "").lower() or
-                            s in i.get("specification", "").lower() or s in i.get("category", "").lower()]
+        # ── Raw Material Inventory Search ─────────────────────
+        st.markdown("**📦 Raw Material Inventory**")
+        inv_search = st.text_input("🔍 Search raw material inventory", key="spo_inv_search",
+                                    placeholder="Type item name, spec, or category and press Enter...")
 
-            for inv_item in filtered[:15]:
-                avail = inv_item.get("quantity", 0)
-                ic1, ic2, ic3, ic4 = st.columns([3, 1, 1, 1])
-                with ic1:
-                    st.markdown(f"**{inv_item['item_name']}**")
-                    st.caption(f"{inv_item.get('category', '')} | {inv_item.get('specification', '')}")
-                with ic2:
-                    st.caption(f"Stock: {avail} {inv_item.get('unit', '')}")
-                with ic3:
-                    qty = st.number_input("Qty", min_value=0, max_value=int(avail), step=1,
-                                           key=f"spo_iq_{inv_item['item_id']}", label_visibility="collapsed")
-                with ic4:
-                    if st.button("Add", key=f"spo_ia_{inv_item['item_id']}"):
-                        if qty > 0:
-                            st.session_state.spo_material.append({
-                                "item_id": inv_item["item_id"],
-                                "item_name": inv_item["item_name"],
-                                "specification": inv_item.get("specification", ""),
-                                "category": inv_item.get("category", ""),
-                                "quantity": qty,
-                                "unit": inv_item.get("unit", ""),
-                            })
-                            st.rerun()
+        if inv_search and len(inv_search) >= 2:
+            s = inv_search.lower()
+            all_inv = get_all_inventory()
+            matched = [i for i in all_inv if i.get("quantity", 0) > 0 and (
+                s in i.get("item_name", "").lower() or
+                s in i.get("specification", "").lower() or
+                s in i.get("category", "").lower())]
 
-            if st.session_state.spo_material:
-                st.markdown("#### Material to Send")
-                for idx, m in enumerate(st.session_state.spo_material):
-                    mc1, mc2, mc3 = st.columns([4, 1, 1])
-                    with mc1:
-                        st.markdown(f"**{m['item_name']}** — {m.get('specification', '')}")
-                    with mc2:
-                        st.caption(f"{m['quantity']} {m['unit']}")
-                    with mc3:
-                        if st.button("🗑️", key=f"spo_mr_{idx}"):
-                            st.session_state.spo_material.pop(idx)
-                            st.rerun()
-        else:
-            st.info("No items in inventory. Add stock first.")
+            if matched:
+                st.caption(f"Found {len(matched)} item(s) in inventory")
+                for inv_item in matched[:10]:
+                    avail = inv_item.get("quantity", 0)
+                    ic1, ic2, ic3, ic4 = st.columns([3, 1, 1, 1])
+                    with ic1:
+                        st.markdown(f"**{inv_item['item_name']}**")
+                        st.caption(f"{inv_item.get('category', '')} | {inv_item.get('specification', '')}")
+                    with ic2:
+                        st.caption(f"Stock: {avail} {inv_item.get('unit', '')}")
+                    with ic3:
+                        qty = st.number_input("Qty", min_value=0, max_value=int(avail), step=1,
+                                               key=f"spo_iq_{inv_item['item_id']}", label_visibility="collapsed")
+                    with ic4:
+                        if st.button("Add", key=f"spo_ia_{inv_item['item_id']}"):
+                            if qty > 0:
+                                st.session_state.spo_material.append({
+                                    "item_id": inv_item["item_id"],
+                                    "item_name": inv_item["item_name"],
+                                    "specification": inv_item.get("specification", ""),
+                                    "category": inv_item.get("category", ""),
+                                    "quantity": qty,
+                                    "unit": inv_item.get("unit", ""),
+                                    "source": "Raw Material",
+                                })
+                                st.rerun()
+            else:
+                st.caption("No matching items in inventory.")
+        elif inv_search:
+            st.caption("Type at least 2 characters.")
 
-        # ─── Step 2: Add service charges ──────────────────────
-        st.markdown("---")
-        section_header("Step 2: Service Charges", "💰")
+        st.markdown("")
 
-        if "spo_items" not in st.session_state:
-            st.session_state.spo_items = []
+        # ── Scrap Store Search ────────────────────────────────
+        st.markdown("**♻️ Scrap Store**")
+        scrap_search = st.text_input("🔍 Search scrap inventory", key="spo_scrap_search",
+                                      placeholder="Type item name or notes and press Enter...")
 
-        with st.form("spo_manual", clear_on_submit=True):
-            mc1, mc2, mc3, mc4, mc5 = st.columns([3, 2, 1, 1, 1])
-            with mc1:
-                desc = st.text_input("Service *", placeholder="e.g., Laser Cutting, Bending")
-            with mc2:
-                spec = st.text_input("Details", placeholder="e.g., 2mm MS sheets")
-            with mc3:
-                qty = st.number_input("Qty", min_value=0, step=1)
-            with mc4:
-                unit = st.selectbox("Unit", UNITS_OF_MEASURE)
-            with mc5:
-                price = st.number_input("Rate ₹", min_value=0.0, step=0.5)
-            if st.form_submit_button("➕ Add Service"):
-                if desc and qty > 0:
-                    st.session_state.spo_items.append({"description": desc, "specification": spec,
-                        "quantity": qty, "unit": unit, "unit_price": price})
-                    st.rerun()
+        if scrap_search and len(scrap_search) >= 2:
+            s = scrap_search.lower()
+            all_scrap = get_all_scrap()
+            matched_scrap = [i for i in all_scrap if i.get("quantity", 0) > 0 and (
+                s in i.get("item_name", "").lower() or
+                s in i.get("specification", "").lower() or
+                s in i.get("category", "").lower() or
+                s in i.get("notes", "").lower())]
 
-        if st.session_state.spo_items:
-            st.markdown("#### Service Line Items")
-            for idx, item in enumerate(st.session_state.spo_items):
-                ic1, ic2, ic3, ic4 = st.columns([4, 1, 1, 1])
-                with ic1:
-                    st.markdown(f"**{item['description']}** — {item.get('specification', '')}")
-                with ic2:
-                    st.caption(f"{item['quantity']} {item['unit']}")
-                with ic3:
-                    st.caption(format_currency(item['quantity'] * item['unit_price']))
-                with ic4:
-                    if st.button("🗑️", key=f"spo_sr_{idx}"):
-                        st.session_state.spo_items.pop(idx)
+            if matched_scrap:
+                st.caption(f"Found {len(matched_scrap)} item(s) in scrap store")
+                for scrap_item in matched_scrap[:10]:
+                    avail = scrap_item.get("quantity", 0)
+                    sc1, sc2, sc3, sc4 = st.columns([3, 1, 1, 1])
+                    with sc1:
+                        st.markdown(f"**{scrap_item['item_name']}**")
+                        st.caption(f"{scrap_item.get('specification', '')} | {scrap_item.get('notes', '')}")
+                    with sc2:
+                        st.caption(f"Stock: {avail} {scrap_item.get('unit', '')}")
+                    with sc3:
+                        qty = st.number_input("Qty", min_value=0, max_value=int(avail), step=1,
+                                               key=f"spo_sq_{scrap_item['item_id']}", label_visibility="collapsed")
+                    with sc4:
+                        if st.button("Add", key=f"spo_sa_{scrap_item['item_id']}"):
+                            if qty > 0:
+                                st.session_state.spo_material.append({
+                                    "item_id": scrap_item["item_id"],
+                                    "item_name": scrap_item["item_name"],
+                                    "specification": scrap_item.get("specification", ""),
+                                    "category": scrap_item.get("category", "Scrap"),
+                                    "quantity": qty,
+                                    "unit": scrap_item.get("unit", ""),
+                                    "source": "Scrap Store",
+                                })
+                                st.rerun()
+            else:
+                st.caption("No matching items in scrap store.")
+        elif scrap_search:
+            st.caption("Type at least 2 characters.")
+
+        # Show selected material
+        if st.session_state.spo_material:
+            st.markdown("#### 📦 Material Selected")
+            for idx, m in enumerate(st.session_state.spo_material):
+                mc1, mc2, mc3, mc4 = st.columns([3, 1, 1, 1])
+                with mc1:
+                    st.markdown(f"**{m['item_name']}** — {m.get('specification', '')}")
+                with mc2:
+                    st.caption(f"{m['quantity']} {m['unit']}")
+                with mc3:
+                    st.caption(f"From: {m.get('source', 'Inventory')}")
+                with mc4:
+                    if st.button("🗑️", key=f"spo_mr_{idx}"):
+                        st.session_state.spo_material.pop(idx)
                         st.rerun()
 
-            total = sum(i["quantity"] * i["unit_price"] for i in st.session_state.spo_items)
-            st.markdown(f"### Service Total: {format_currency(total)}")
-
-        # ─── Step 3: Save / Place ─────────────────────────────
+        # ─── Step 2: Service description + rate ───────────────
         st.markdown("---")
-        can_save = st.session_state.spo_items or st.session_state.spo_material
+        section_header("Step 2: Service Charge", "💰")
+        st.markdown("*Describe the service and rate. The material items from Step 1 will be included in the PO automatically.*")
 
-        if can_save:
+        if "spo_service" not in st.session_state:
+            st.session_state.spo_service = {"description": "", "rate": 0.0}
+
+        with st.form("spo_svc_form"):
+            sc1, sc2 = st.columns([3, 1])
+            with sc1:
+                svc_desc = st.text_input("Service Description *", placeholder="e.g., Laser Cutting, Powder Coating, Bending")
+            with sc2:
+                svc_rate = st.number_input("Service Rate (₹)", min_value=0.0, step=0.5)
+            if st.form_submit_button("✅ Set Service"):
+                if svc_desc:
+                    st.session_state.spo_service = {"description": svc_desc, "rate": svc_rate}
+                    st.success(f"Service set: **{svc_desc}** — ₹{svc_rate:,.2f}")
+                else:
+                    st.error("Service description is required.")
+
+        if st.session_state.spo_service.get("description"):
+            st.markdown(f"**Service:** {st.session_state.spo_service['description']} | **Rate:** {format_currency(st.session_state.spo_service['rate'])}")
+
+        # ─── Step 3: Summary & Save/Place ─────────────────────
+        st.markdown("---")
+        section_header("Step 3: Review & Place", "🚀")
+
+        has_material = len(st.session_state.spo_material) > 0
+        has_service = bool(st.session_state.spo_service.get("description"))
+
+        if has_material or has_service:
+            # Build summary
+            if has_material:
+                st.markdown("**Material to send:**")
+                for m in st.session_state.spo_material:
+                    st.caption(f"• {m['item_name']} — {m['quantity']} {m['unit']}")
+
+            if has_service:
+                st.markdown(f"**Service:** {st.session_state.spo_service['description']} — {format_currency(st.session_state.spo_service['rate'])}")
+
+            # Build PO line items: material items + service charge
+            po_line_items = []
+            for m in st.session_state.spo_material:
+                po_line_items.append({
+                    "description": m["item_name"],
+                    "specification": m.get("specification", ""),
+                    "quantity": m["quantity"],
+                    "unit": m["unit"],
+                    "unit_price": 0,  # material cost is already in inventory
+                })
+            if has_service:
+                total_material_qty = sum(m["quantity"] for m in st.session_state.spo_material) if st.session_state.spo_material else 1
+                po_line_items.append({
+                    "description": st.session_state.spo_service["description"],
+                    "specification": "Service charge",
+                    "quantity": total_material_qty,
+                    "unit": "Lot" if not st.session_state.spo_material else st.session_state.spo_material[0].get("unit", "Nos"),
+                    "unit_price": st.session_state.spo_service["rate"],
+                })
+
+            total = sum(i["quantity"] * i["unit_price"] for i in po_line_items)
+            if total > 0:
+                st.markdown(f"### Service Total: {format_currency(total)}")
+
+            st.markdown("")
             cs, cp = st.columns(2)
             with cs:
                 if st.button("💾 Save Draft", key="spo_d", use_container_width=True):
-                    svc_items = st.session_state.spo_items if st.session_state.spo_items else [
-                        {"description": m["item_name"], "specification": m.get("specification", ""),
-                         "quantity": m["quantity"], "unit": m["unit"], "unit_price": 0}
-                        for m in st.session_state.spo_material]
                     po = create_service_po(project["project_id"], vendor["vendor_id"], vendor["name"],
-                        pt, str(ed), svc_items, notes)
-                    if st.session_state.spo_material:
+                        pt, str(ed), po_line_items, notes)
+                    if has_material:
                         issue_material_to_service_vendor(po["po_id"], st.session_state.spo_material)
                     for f in (new_spo_attachments or []):
                         upload_attachment(po["po_id"], f.name, f.read(), f.type)
                     st.success(f"SPO **{po['po_id']}** saved. Material deducted from inventory.")
-                    st.session_state.spo_items = []
                     st.session_state.spo_material = []
+                    st.session_state.spo_service = {"description": "", "rate": 0.0}
                     st.rerun()
             with cp:
                 if st.button("📤 Place Order", key="spo_pl", use_container_width=True, type="primary"):
-                    svc_items = st.session_state.spo_items if st.session_state.spo_items else [
-                        {"description": m["item_name"], "specification": m.get("specification", ""),
-                         "quantity": m["quantity"], "unit": m["unit"], "unit_price": 0}
-                        for m in st.session_state.spo_material]
-                    total = sum(i.get("quantity", 0) * i.get("unit_price", 0) for i in svc_items)
                     po = create_service_po(project["project_id"], vendor["vendor_id"], vendor["name"],
-                        pt, str(ed), svc_items, notes)
-                    if st.session_state.spo_material:
+                        pt, str(ed), po_line_items, notes)
+                    if has_material:
                         issue_material_to_service_vendor(po["po_id"], st.session_state.spo_material)
                     place_service_po_via_sqs(po["po_id"], vendor.get("email", ""), vendor["name"],
-                        svc_items, total, pt, str(ed))
-                    pk = generate_po_pdf(po, svc_items, "Service")
+                        po_line_items, total, pt, str(ed))
+                    pk = generate_po_pdf(po, po_line_items, "Service")
                     if pk:
                         update_po_pdf_key(po["po_id"], pk, "service_po")
                     for f in (new_spo_attachments or []):
                         upload_attachment(po["po_id"], f.name, f.read(), f.type)
                     st.success(f"SPO **{po['po_id']}** placed! Material deducted from inventory.")
-                    st.session_state.spo_items = []
                     st.session_state.spo_material = []
+                    st.session_state.spo_service = {"description": "", "rate": 0.0}
                     st.rerun()
         else:
-            st.info("Add material from inventory and/or service charges above.")
+            st.info("Select material from inventory (Step 1) and/or add a service charge (Step 2) to proceed.")
 
     # ═══════════════════════════════════════════════════════════
     #  ALL SERVICE POs
@@ -266,11 +332,13 @@ def render():
                             st.markdown("**Material from this SPO:**")
                             for m in issued:
                                 st.caption(f"• {m.get('item_name', '')} — {m.get('quantity', 0)} {m.get('unit', '')}")
-                            if st.button("📄 Generate Delivery Challan from Issued Material", key=f"dc_{po['po_id']}"):
-                                challan_items = [{"description": m.get("item_name", ""), "item_name": m.get("item_name", ""),
+                            if st.button("📄 Generate Delivery Challan", key=f"dc_{po['po_id']}"):
+                                challan_items = [{"description": m.get("item_name", ""),
+                                                  "item_name": m.get("item_name", ""),
                                                   "specification": m.get("specification", ""),
-                                                  "quantity": m.get("quantity", 0), "unit": m.get("unit", ""),
-                                                  "hsn_code": ""} for m in issued]
+                                                  "quantity": m.get("quantity", 0),
+                                                  "unit": m.get("unit", ""), "hsn_code": ""}
+                                                 for m in issued]
                                 po_with_addr = dict(po)
                                 v = get_service_vendor(po.get("vendor_id", ""))
                                 if v:
@@ -283,27 +351,26 @@ def render():
                                             f"DC-{po['po_id']}.pdf", "application/pdf", key=f"dcpdf_{po['po_id']}")
                                     st.success("Delivery Challan generated!")
                         else:
-                            st.info("No material was issued from inventory for this SPO. You can generate a DC from the service line items instead.")
+                            st.info("No material was issued from inventory. Generating DC from service items.")
                             po_items_for_dc = get_service_po_items(po["po_id"])
-                            if po_items_for_dc:
-                                if st.button("📄 Generate Delivery Challan from Service Items", key=f"dc2_{po['po_id']}"):
-                                    challan_items = [{"description": i.get("description", ""),
-                                                      "item_name": i.get("description", ""),
-                                                      "specification": i.get("specification", ""),
-                                                      "quantity": i.get("quantity", 0),
-                                                      "unit": i.get("unit", ""), "hsn_code": ""}
-                                                     for i in po_items_for_dc]
-                                    po_with_addr = dict(po)
-                                    v = get_service_vendor(po.get("vendor_id", ""))
-                                    if v:
-                                        po_with_addr["vendor_address"] = v.get("address", "")
-                                    dc_key = generate_delivery_challan(po_with_addr, challan_items)
-                                    if dc_key:
-                                        dc_bytes = get_po_pdf_download(dc_key)
-                                        if dc_bytes:
-                                            st.download_button("⬇️ Download Delivery Challan", dc_bytes,
-                                                f"DC-{po['po_id']}.pdf", "application/pdf", key=f"dcpdf2_{po['po_id']}")
-                                        st.success("Delivery Challan generated!")
+                            if po_items_for_dc and st.button("📄 Generate Delivery Challan", key=f"dc2_{po['po_id']}"):
+                                challan_items = [{"description": i.get("description", ""),
+                                                  "item_name": i.get("description", ""),
+                                                  "specification": i.get("specification", ""),
+                                                  "quantity": i.get("quantity", 0),
+                                                  "unit": i.get("unit", ""), "hsn_code": ""}
+                                                 for i in po_items_for_dc]
+                                po_with_addr = dict(po)
+                                v = get_service_vendor(po.get("vendor_id", ""))
+                                if v:
+                                    po_with_addr["vendor_address"] = v.get("address", "")
+                                dc_key = generate_delivery_challan(po_with_addr, challan_items)
+                                if dc_key:
+                                    dc_bytes = get_po_pdf_download(dc_key)
+                                    if dc_bytes:
+                                        st.download_button("⬇️ Download Delivery Challan", dc_bytes,
+                                            f"DC-{po['po_id']}.pdf", "application/pdf", key=f"dcpdf2_{po['po_id']}")
+                                    st.success("Delivery Challan generated!")
 
                 # Attachments
                 st.markdown("**📎 Attachments**")
@@ -321,7 +388,6 @@ def render():
                 po_items = get_service_po_items(po["po_id"])
 
                 if is_complete:
-                    # ─── COMPLETE: Read-only ──────────────────
                     st.success("✅ This Service PO is complete.")
                     for item in po_items:
                         st.markdown(f"**{item.get('description', '')}** — {item.get('specification', '')}")
@@ -344,7 +410,6 @@ def render():
                             st.success("Reopened!")
                             st.rerun()
                 else:
-                    # ─── EDITABLE: Receipt + Scrap ────────────
                     all_received = True
                     for item in po_items:
                         ordered = float(item.get("quantity", 0))
@@ -370,10 +435,10 @@ def render():
                             with rc2:
                                 with st.form(key=f"srecv_{po['po_id']}_{item['item_id']}"):
                                     recv_now = st.number_input("Receiving now", min_value=0.0,
-                                        max_value=remaining, value=0.0, step=1.0,
+                                        max_value=remaining if remaining > 0 else 1.0, value=0.0, step=1.0,
                                         key=f"srn_{po['po_id']}_{item['item_id']}")
                                     mark_done = st.checkbox("All received — close this item",
-                                        key=f"smd_{po['po_id']}_{item['item_id']}")
+                                        value=False, key=f"smd_{po['po_id']}_{item['item_id']}")
 
                                     st.markdown("**Scrap received:**")
                                     scr = st.number_input("Scrap Qty", min_value=0.0, step=0.5,
@@ -386,18 +451,15 @@ def render():
                                         is_done = mark_done
                                         update_service_po_item(po["po_id"], item["item_id"],
                                             new_total, is_done, fs, fc, scr, su, sn)
-                                        # Add scrap to scrap inventory
                                         if scr > 0:
                                             add_scrap_item(
-                                                item.get("description", ""), item.get("category", "Scrap"),
+                                                item.get("description", ""), "Scrap",
                                                 item.get("specification", ""), scr,
                                                 item.get("unit", "Kg"), po["po_id"],
                                                 f"{'Usable' if su else 'Not usable'}: {sn}",
                                             )
                                         if recv_now > 0:
                                             st.success(f"Received {recv_now}. Total: {new_total}/{ordered}")
-                                        elif is_done:
-                                            st.success("Marked as complete")
                                         else:
                                             st.success("Updated!")
                                         st.rerun()
