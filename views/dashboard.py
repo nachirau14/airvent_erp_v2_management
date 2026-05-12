@@ -1,4 +1,4 @@
-"""Dashboard — overview of operations."""
+"""Dashboard — fast loading, only pending POs shown."""
 import streamlit as st
 import pandas as pd
 from utils.db import (get_all_projects, get_all_raw_material_pos, get_all_service_pos,
@@ -12,22 +12,25 @@ def render():
     st.markdown("*Overview of your fabrication operations*")
     st.markdown("---")
 
+    # All data is cached (60s TTL) so these are fast after first load
     projects = get_all_projects()
     rm_pos = get_all_raw_material_pos()
     svc_pos = get_all_service_pos()
-    inv = get_all_inventory()
-    master = get_all_master_items()
-    fg = get_finished_goods()
-    dispatched = get_dispatched_goods()
 
-    # ─── Top Metrics ──────────────────────────────────────────
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    with c1: styled_metric("Master Items", len(master), color="#1e40af")
-    with c2: styled_metric("Projects", len(projects), color="#7c3aed")
-    with c3: styled_metric("Material POs", len(rm_pos), color="#0369a1")
-    with c4: styled_metric("Service POs", len(svc_pos), color="#0e7490")
-    with c5: styled_metric("Inventory Items", len(inv), color="#15803d")
-    with c6: styled_metric("Finished Goods", len([f for f in fg if f.get("status") == "In Store"]), color="#b45309")
+    # Top metrics — only counts, no heavy processing
+    active_projects = [p for p in projects if p.get("status") not in ("Complete", "Dispatched")]
+    pending_rm = [po for po in rm_pos if po.get("status") in ("Draft", "Placed", "Partially Received")]
+    pending_svc = [po for po in svc_pos if po.get("status") in ("Draft", "Placed", "In Progress", "Partially Received")]
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        styled_metric("Active Projects", len(active_projects), color="#1e40af")
+    with c2:
+        styled_metric("Pending Material POs", len(pending_rm), color="#0369a1")
+    with c3:
+        styled_metric("Pending Service POs", len(pending_svc), color="#0e7490")
+    with c4:
+        styled_metric("Total Projects", len(projects), color="#7c3aed")
 
     st.markdown("")
 
@@ -36,9 +39,8 @@ def render():
 
     with col_left:
         section_header("Active Projects", "📋")
-        active = [p for p in projects if p.get("status") not in ("Complete", "Dispatched")]
-        if active:
-            for proj in sorted(active, key=lambda x: x.get("created_at", ""), reverse=True)[:8]:
+        if active_projects:
+            for proj in sorted(active_projects, key=lambda x: x.get("created_at", ""), reverse=True)[:8]:
                 pc1, pc2 = st.columns([3, 1])
                 with pc1:
                     st.markdown(f"**{proj['name']}** — {proj.get('client_name', '')}")
@@ -60,8 +62,6 @@ def render():
             for status, count in po_counts.items():
                 color = {"Draft": "🔘", "Placed": "🔵", "Partially Received": "🟡", "Complete": "🟢", "Cancelled": "🔴"}.get(status, "⚪")
                 st.markdown(f"{color} **{status}**: {count}")
-        else:
-            st.caption("No material POs")
 
         svc_counts = {}
         for po in svc_pos:
@@ -73,16 +73,13 @@ def render():
                 color = {"Draft": "🔘", "Placed": "🔵", "In Progress": "🟡", "Complete": "🟢"}.get(status, "⚪")
                 st.markdown(f"{color} **{status}**: {count}")
 
-    # ─── Outstanding POs (Material + Service) ──────────────────
+    # ─── Outstanding POs (only pending) ───────────────────────
     st.markdown("")
     section_header("Outstanding Purchase Orders", "⚠️")
 
-    outstanding_rm = [po for po in rm_pos if po.get("status") in ("Draft", "Placed", "Partially Received")]
-    outstanding_svc = [po for po in svc_pos if po.get("status") in ("Draft", "Placed", "In Progress", "Partially Received")]
-
-    if outstanding_rm:
-        st.markdown(f"**📦 Material POs — {len(outstanding_rm)} pending**")
-        df = pd.DataFrame(outstanding_rm)
+    if pending_rm:
+        st.markdown(f"**📦 Material POs — {len(pending_rm)} pending**")
+        df = pd.DataFrame(pending_rm)
         cols = ["po_id", "vendor_name", "status", "total_amount", "expected_delivery"]
         available = [c for c in cols if c in df.columns]
         if available:
@@ -90,23 +87,37 @@ def render():
     else:
         st.success("No outstanding material POs")
 
-    if outstanding_svc:
-        st.markdown(f"**🛠️ Service POs — {len(outstanding_svc)} pending**")
-        df = pd.DataFrame(outstanding_svc)
+    if pending_svc:
+        st.markdown(f"**🛠️ Service POs — {len(pending_svc)} pending**")
+        df = pd.DataFrame(pending_svc)
         cols = ["po_id", "vendor_name", "status", "total_amount", "expected_delivery"]
         available = [c for c in cols if c in df.columns]
         if available:
             st.dataframe(df[available], use_container_width=True, hide_index=True)
-    elif not outstanding_rm:
+    elif not pending_rm:
         st.success("No outstanding service POs either")
 
-    # ─── Recent Dispatches ────────────────────────────────────
-    section_header("Recent Dispatches", "🚚")
-    if dispatched:
-        df = pd.DataFrame(dispatched)
-        cols = ["dispatch_id", "project_id", "dispatch_to", "vehicle_no", "dispatched_at"]
-        available = [c for c in cols if c in df.columns]
-        if available:
-            st.dataframe(df[available].head(5), use_container_width=True, hide_index=True)
-    else:
-        empty_state("🚚", "No dispatches yet")
+    # ─── Quick Stats (lazy loaded in expander) ────────────────
+    with st.expander("📊 Full Stats (Inventory, Finished Goods, Dispatches)"):
+        inv = get_all_inventory()
+        fg = get_finished_goods()
+        dispatched = get_dispatched_goods()
+        master = get_all_master_items()
+
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        with sc1:
+            styled_metric("Master Items", len(master), color="#1e40af")
+        with sc2:
+            styled_metric("Inventory Items", len(inv), color="#15803d")
+        with sc3:
+            styled_metric("Finished Goods", len([f for f in fg if f.get("status") == "In Store"]), color="#b45309")
+        with sc4:
+            styled_metric("Dispatches", len(dispatched), color="#dc2626")
+
+        if dispatched:
+            st.markdown("**Recent Dispatches**")
+            df = pd.DataFrame(dispatched)
+            cols = ["dispatch_id", "project_id", "dispatch_to", "vehicle_no", "dispatched_at"]
+            available = [c for c in cols if c in df.columns]
+            if available:
+                st.dataframe(df[available].head(5), use_container_width=True, hide_index=True)
