@@ -221,6 +221,9 @@ def render():
 
         notes = st.text_area("Notes")
 
+        gst_pct = st.number_input("GST %", min_value=0.0, max_value=28.0, value=18.0, step=0.5,
+                                    help="Default 18%. CGST and SGST will be split equally.")
+
         st.markdown("---")
         st.markdown("**📎 Attach files to this PO**")
         new_attachments = st.file_uploader("Choose files", accept_multiple_files=True, key="new_po_attachments")
@@ -294,7 +297,7 @@ def render():
             with cs:
                 if st.button("💾 Save Draft", use_container_width=True):
                     po = create_raw_material_po(project["project_id"], vendor["vendor_id"], vendor["name"],
-                        payment_terms, str(expected_delivery), st.session_state.po_items, notes)
+                        payment_terms, str(expected_delivery), st.session_state.po_items, notes, gst_pct)
                     for f in (new_attachments or []):
                         upload_attachment(po["po_id"], f.name, f.read(), f.type)
                     st.success(f"PO **{po['po_id']}** saved")
@@ -303,7 +306,7 @@ def render():
             with cp:
                 if st.button("📤 Place Order", use_container_width=True, type="primary"):
                     po = create_raw_material_po(project["project_id"], vendor["vendor_id"], vendor["name"],
-                        payment_terms, str(expected_delivery), st.session_state.po_items, notes)
+                        payment_terms, str(expected_delivery), st.session_state.po_items, notes, gst_pct)
                     place_po_via_sqs(po["po_id"], vendor.get("email", ""), vendor["name"],
                         st.session_state.po_items, total, payment_terms, str(expected_delivery))
                     pdf_key = generate_po_pdf(po, st.session_state.po_items, "Material")

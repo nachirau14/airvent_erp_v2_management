@@ -59,6 +59,9 @@ def render():
             ed = st.date_input("Expected Return", value=datetime.now().date() + timedelta(days=14), key="spo_ed")
         notes = st.text_area("Notes", key="spo_n")
 
+        gst_pct = st.number_input("GST %", min_value=0.0, max_value=28.0, value=18.0, step=0.5,
+                                    key="spo_gst", help="Default 18%. CGST and SGST split equally.")
+
         st.markdown("---")
         st.markdown("**📎 Attach files**")
         new_spo_attachments = st.file_uploader("Choose files", accept_multiple_files=True, key="new_spo_att")
@@ -248,7 +251,7 @@ def render():
             with cs:
                 if st.button("💾 Save Draft", key="spo_d", use_container_width=True):
                     po = create_service_po(project["project_id"], vendor["vendor_id"], vendor["name"],
-                        pt, str(ed), po_line_items, notes)
+                        pt, str(ed), po_line_items, notes, gst_pct)
                     if has_material:
                         issue_material_to_service_vendor(po["po_id"], st.session_state.spo_material)
                     for f in (new_spo_attachments or []):
@@ -260,7 +263,7 @@ def render():
             with cp:
                 if st.button("📤 Place Order", key="spo_pl", use_container_width=True, type="primary"):
                     po = create_service_po(project["project_id"], vendor["vendor_id"], vendor["name"],
-                        pt, str(ed), po_line_items, notes)
+                        pt, str(ed), po_line_items, notes, gst_pct)
                     if has_material:
                         issue_material_to_service_vendor(po["po_id"], st.session_state.spo_material)
                     place_service_po_via_sqs(po["po_id"], vendor.get("email", ""), vendor["name"],
