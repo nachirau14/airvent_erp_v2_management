@@ -1611,10 +1611,14 @@ def delete_scrap_item(item_id):
 # ═══════════════════════════════════════════════════════════════════
 @_write_and_clear
 def issue_material_to_service_vendor(po_id, inventory_items):
-    """Deduct material from raw inventory for a service PO.
-    inventory_items = [{"item_id": "INV-xxx", "item_name": "...", "quantity": 10, "unit": "Kg"}, ...]"""
+    """Deduct material from raw inventory or scrap store for a service PO.
+    Routes to correct table based on item source."""
     for it in inventory_items:
-        update_inventory_qty(it["item_id"], -it["quantity"])
+        source = it.get("source", "Raw Material")
+        if source == "Scrap Store" or it.get("item_id", "").startswith("SCR-"):
+            update_scrap_qty(it["item_id"], -it["quantity"])
+        else:
+            update_inventory_qty(it["item_id"], -it["quantity"])
     # Store what was issued on the PO record
     db = get_dynamodb()
     table = db.Table(TABLES["service_po"])

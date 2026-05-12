@@ -1,22 +1,25 @@
-"""Inventory — linked to master items catalog."""
+"""Inventory — raw material stock + scrap store."""
 import streamlit as st
 import pandas as pd
 from utils.db import (get_all_inventory, add_inventory_item, update_inventory_qty,
-                       delete_inventory_item, get_all_master_items, receive_to_inventory)
+                       delete_inventory_item, get_all_master_items, receive_to_inventory,
+                       get_all_scrap, delete_scrap_item, update_scrap_qty)
 from utils.ui_helpers import section_header, empty_state, styled_metric
 from config import MATERIAL_CATEGORIES, UNITS_OF_MEASURE
 
 
 def render():
     st.markdown("# 📦 Inventory Management")
-    st.markdown("*Track stock on hand — add from master item catalog*")
+    st.markdown("*Raw material stock and scrap store*")
     st.markdown("---")
 
-    tab_view, tab_add = st.tabs(["📋 Current Stock", "➕ Add Stock"])
+    tab_view, tab_scrap, tab_add = st.tabs(["📋 Raw Material Stock", "♻️ Scrap Store", "➕ Add Stock"])
 
     with tab_view:
-        section_header("Inventory On Hand", "📦")
-        inventory = get_all_inventory()
+        section_header("Raw Material Stock", "📦")
+        all_inventory = get_all_inventory()
+        # Filter out exhausted items (qty <= 0)
+        inventory = [i for i in all_inventory if i.get("quantity", 0) > 0]
 
         if not inventory:
             empty_state("📦", "No inventory items", "Add stock from the master catalog in the 'Add Stock' tab")
@@ -88,6 +91,47 @@ def render():
                 delete_inventory_item(del_opts[del_sel]["item_id"])
                 st.success("Deleted!")
                 st.rerun()
+
+    # ─── Scrap Store ────────────────────────────────────────────
+    with tab_scrap:
+        section_header("Scrap Store", "♻️")
+        all_scrap = get_all_scrap()
+        scrap = [s for s in all_scrap if s.get("quantity", 0) > 0]
+
+        if not scrap:
+            empty_state("♻️", "No scrap items in stock")
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                styled_metric("Scrap Items", len(scrap), color="#d97706")
+            with c2:
+                styled_metric("Total from POs", len(set(s.get("source_po", "") for s in scrap if s.get("source_po"))), color="#7c3aed")
+
+            search_scrap = st.text_input("🔍 Search scrap", key="scrap_search")
+            filtered_scrap = scrap
+            if search_scrap:
+                s = search_scrap.lower()
+                filtered_scrap = [i for i in scrap if s in i.get("item_name", "").lower() or s in i.get("specification", "").lower() or s in i.get("notes", "").lower()]
+
+            if filtered_scrap:
+                df = pd.DataFrame(filtered_scrap)
+                cols = ["item_id", "item_name", "category", "specification", "quantity", "unit", "source_po", "notes"]
+                available = [c for c in cols if c in df.columns]
+                st.dataframe(df[available], use_container_width=True, hide_index=True, height=300)
+                st.caption(f"Showing {len(filtered_scrap)} scrap items (zero-stock items hidden)")
+
+            # Adjust scrap qty
+            st.markdown("#### 🔄 Adjust Scrap Quantity")
+            scrap_opts = {f"{i['item_name']} | {i.get('specification', '')} | Qty: {i.get('quantity', 0)} ({i['item_id']})": i for i in scrap}
+            sel_scrap = st.selectbox("Select Item", list(scrap_opts.keys()), key="scrap_adj_sel")
+            ac1, ac2 = st.columns(2)
+            with ac1:
+                adj = st.number_input("Quantity (+/-)", step=1.0, key="scrap_adj_qty")
+            with ac2:
+                if st.button("Apply", key="scrap_adj_btn"):
+                    update_scrap_qty(scrap_opts[sel_scrap]["item_id"], adj)
+                    st.success("Adjusted!")
+                    st.rerun()
 
     with tab_add:
         section_header("Add Stock from Master Catalog", "➕")

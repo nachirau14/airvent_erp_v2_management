@@ -428,7 +428,17 @@ def _render_spo(po):
                 if st.button("🔓 Reopen", key=f"srob_{po['po_id']}",
                              disabled=ct.strip().upper() != "INCOMPLETE"):
                     update_service_po_status(po["po_id"], "Partially Received")
-                    st.success("Reopened!")
+                    # Reset received flag on all items so they become editable
+                    for item in po_items:
+                        if item.get("received"):
+                            update_service_po_item(po["po_id"], item["item_id"],
+                                float(item.get("quantity_received", 0)), False,
+                                item.get("finishing_status", "Pending"),
+                                item.get("finishing_comment", ""),
+                                float(item.get("scrap_received", 0)),
+                                item.get("scrap_usable", False),
+                                item.get("scrap_notes", ""))
+                    st.success("Reopened! All items are now editable.")
                     st.rerun()
         else:
             all_received = True
@@ -467,7 +477,11 @@ def _render_spo(po):
                             sn = st.text_input("Scrap notes", key=f"ssn_{po['po_id']}_{item['item_id']}")
 
                             if st.form_submit_button("💾 Update"):
-                                new_total = already + recv_now
+                                # If marking complete with 0 entered, auto-receive remaining
+                                actual_recv = recv_now
+                                if mark_done and recv_now == 0:
+                                    actual_recv = remaining
+                                new_total = already + actual_recv
                                 is_done = mark_done
                                 update_service_po_item(po["po_id"], item["item_id"],
                                     new_total, is_done, fs, fc, scr, su, sn)

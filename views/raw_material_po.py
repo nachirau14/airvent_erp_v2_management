@@ -105,7 +105,12 @@ def _render_po(po):
                     if st.button("🔓 Reopen PO", key=f"reopen_btn_{po['po_id']}",
                                  disabled=confirm_text.strip().upper() != "INCOMPLETE"):
                         update_raw_material_po_status(po["po_id"], "Partially Received")
-                        st.success("PO reopened.")
+                        # Reset received flag on all items
+                        for item in po_items:
+                            if item.get("received"):
+                                update_po_item_receipt(po["po_id"], item["item_id"],
+                                    float(item.get("quantity_received", 0)), False)
+                        st.success("PO reopened. All items are now editable.")
                         st.rerun()
             else:
                 all_received = True
@@ -146,6 +151,9 @@ def _render_po(po):
                                 submitted = st.form_submit_button("💾 Receive")
 
                             if submitted and (recv_now > 0 or mark_complete):
+                                # If marking complete with 0 entered, auto-receive remaining
+                                if mark_complete and recv_now == 0:
+                                    recv_now = remaining
                                 new_total = already_received + recv_now
                                 is_done = mark_complete
                                 update_po_item_receipt(po["po_id"], item["item_id"], new_total, is_done)
