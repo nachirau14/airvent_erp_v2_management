@@ -7,7 +7,8 @@ from utils.db import (
     get_all_projects, get_all_service_vendors, get_service_vendor,
     create_service_po, get_all_service_pos,
     get_service_po_items, update_service_po_item, update_service_po_status,
-    place_service_po_via_sqs, generate_po_pdf, update_po_pdf_key,
+    place_service_po_via_sqs, delete_service_po,
+    generate_po_pdf, update_po_pdf_key,
     get_po_pdf_download, upload_attachment, list_attachments, get_attachment,
     get_all_inventory, get_all_scrap, issue_material_to_service_vendor,
     generate_delivery_challan, add_scrap_item,
@@ -491,11 +492,18 @@ def _render_spo(po):
                     st.rerun()
 
         if status == "Draft":
-            if st.button("📤 Place Order", key=f"spl_{po['po_id']}", type="primary"):
-                place_service_po_via_sqs(po["po_id"], "", po.get("vendor_name", ""), [], 0, "", "")
-                pi = get_service_po_items(po["po_id"])
-                pk = generate_po_pdf(po, pi, "Service")
-                if pk:
-                    update_po_pdf_key(po["po_id"], pk, "service_po")
-                st.success("Placed!")
-                st.rerun()
+            dc1, dc2 = st.columns(2)
+            with dc1:
+                if st.button("📤 Place Order", key=f"spl_{po['po_id']}", type="primary", use_container_width=True):
+                    place_service_po_via_sqs(po["po_id"], "", po.get("vendor_name", ""), [], 0, "", "")
+                    pi = get_service_po_items(po["po_id"])
+                    pk = generate_po_pdf(po, pi, "Service")
+                    if pk:
+                        update_po_pdf_key(po["po_id"], pk, "service_po")
+                    st.success("Placed!")
+                    st.rerun()
+            with dc2:
+                if st.button("🗑️ Delete Draft", key=f"sdel_{po['po_id']}", use_container_width=True):
+                    delete_service_po(po["po_id"])
+                    st.success(f"Draft SPO {po['po_id']} deleted.")
+                    st.rerun()

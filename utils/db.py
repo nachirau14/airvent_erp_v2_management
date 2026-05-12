@@ -1265,6 +1265,30 @@ def update_po_pdf_key(po_id, pdf_key, table_key="raw_material_po"):
         ExpressionAttributeValues={":pk": pdf_key})
 
 @_write_and_clear
+def delete_raw_material_po(po_id):
+    """Delete a draft PO and all its line items."""
+    db = get_dynamodb()
+    # Delete line items
+    items_table = db.Table(TABLES["raw_material_po_items"])
+    items = get_raw_material_po_items(po_id)
+    for item in items:
+        items_table.delete_item(Key={"po_id": po_id, "item_id": item["item_id"]})
+    # Delete PO
+    po_table = db.Table(TABLES["raw_material_po"])
+    po_table.delete_item(Key={"po_id": po_id})
+
+@_write_and_clear
+def delete_service_po(po_id):
+    """Delete a draft Service PO and all its line items."""
+    db = get_dynamodb()
+    items_table = db.Table(TABLES["service_po_items"])
+    items = get_service_po_items(po_id)
+    for item in items:
+        items_table.delete_item(Key={"po_id": po_id, "item_id": item["item_id"]})
+    po_table = db.Table(TABLES["service_po"])
+    po_table.delete_item(Key={"po_id": po_id})
+
+@_write_and_clear
 def place_po_via_sqs(po_id, vendor_email, vendor_name, items, total_amount, payment_terms, expected_delivery):
     """Place PO: update status + send email to vendor + notify management."""
     update_raw_material_po_status(po_id, "Placed")

@@ -8,6 +8,7 @@ from utils.db import (
     create_raw_material_po, get_all_raw_material_pos,
     get_raw_material_po_items, update_po_item_receipt,
     update_raw_material_po_status, place_po_via_sqs,
+    delete_raw_material_po,
     receive_to_inventory,
     generate_po_pdf, update_po_pdf_key, get_po_pdf_download,
     upload_attachment, list_attachments, get_attachment,
@@ -171,14 +172,21 @@ def _render_po(po):
                         st.rerun()
 
         if status == "Draft":
-            if st.button("📤 Place Order", key=f"pl_{po['po_id']}", type="primary"):
-                place_po_via_sqs(po["po_id"], "", po.get("vendor_name", ""), [], 0, "", "")
-                pi = get_raw_material_po_items(po["po_id"])
-                pk = generate_po_pdf(po, pi, "Material")
-                if pk:
-                    update_po_pdf_key(po["po_id"], pk)
-                st.success("Placed!")
-                st.rerun()
+            dc1, dc2 = st.columns(2)
+            with dc1:
+                if st.button("📤 Place Order", key=f"pl_{po['po_id']}", type="primary", use_container_width=True):
+                    place_po_via_sqs(po["po_id"], "", po.get("vendor_name", ""), [], 0, "", "")
+                    pi = get_raw_material_po_items(po["po_id"])
+                    pk = generate_po_pdf(po, pi, "Material")
+                    if pk:
+                        update_po_pdf_key(po["po_id"], pk)
+                    st.success("Placed!")
+                    st.rerun()
+            with dc2:
+                if st.button("🗑️ Delete Draft", key=f"del_{po['po_id']}", use_container_width=True):
+                    delete_raw_material_po(po["po_id"])
+                    st.success(f"Draft PO {po['po_id']} deleted.")
+                    st.rerun()
 
 
 def render():
