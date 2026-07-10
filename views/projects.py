@@ -1,9 +1,10 @@
-"""Projects & BOQ — search master items by name/category/sub_category, auto-fill rate."""
+"""Projects & BOQ — search master items, vendor dropdown with 'Add New' option."""
 import streamlit as st
 import pandas as pd
 from utils.db import (create_project, get_all_projects, update_project_status,
                        add_boq_item, get_boq_items, delete_boq_item,
-                       get_all_master_items, create_staged_orders_from_boq)
+                       get_all_master_items, create_staged_orders_from_boq,
+                       get_all_vendors, get_all_service_vendors, add_vendor)
 from utils.ui_helpers import section_header, project_status_badge, format_currency, empty_state, styled_metric
 from config import PRODUCTION_STAGES, PROJECT_STATUSES
 
@@ -121,35 +122,68 @@ def render():
                     st.warning("No master items. Add items in Master Items page first."); continue
 
                 all_cats = sorted(set(m.get("category", "") for m in master_items if m.get("category")))
-                all_subcats = sorted(set(m.get("sub_category", "") for m in master_items if m.get("sub_category")))
 
-                fc1, fc2, fc3 = st.columns([2, 1, 1])
+                # Vendor dropdown from registered vendors
+                all_vendors = get_all_vendors()
+                all_svc_vendors = get_all_service_vendors()
+                vendor_names = sorted(set(v.get("name", "") for v in all_vendors if v.get("name")))
+                svc_vendor_names = sorted(set(v.get("name", "") for v in all_svc_vendors if v.get("name")))
+                combined_vendors = sorted(set(vendor_names + svc_vendor_names))
+                vendor_options = ["All"] + combined_vendors + ["➕ Add New Vendor..."]
+
+                fc1, fc2, fc3, fc4 = st.columns([2, 1, 1, 1])
                 with fc1:
-                    search = st.text_input("🔍 Search by name, spec, or vendor", key=f"ms_{pid}")
+                    search = st.text_input("🔍 Search by name or spec", key=f"ms_{pid}")
                 with fc2:
-                    cat_filter = st.selectbox("Category", ["All"] + all_cats, key=f"mc_{pid}")
+                    ven_filter = st.selectbox("Vendor", vendor_options, key=f"mv_{pid}")
                 with fc3:
-                    # Filter sub_categories based on selected category
+                    cat_filter = st.selectbox("Category", ["All"] + all_cats, key=f"mc_{pid}")
+                with fc4:
                     if cat_filter != "All":
                         filtered_subcats = sorted(set(m.get("sub_category", "") for m in master_items
                                                       if m.get("category") == cat_filter and m.get("sub_category")))
                     else:
-                        filtered_subcats = all_subcats
+                        filtered_subcats = sorted(set(m.get("sub_category", "") for m in master_items if m.get("sub_category")))
                     subcat_filter = st.selectbox("Sub-Category", ["All"] + filtered_subcats, key=f"msc_{pid}")
+
+                # Handle "Add New Vendor"
+                if ven_filter == "➕ Add New Vendor...":
+                    st.markdown("---")
+                    st.markdown("#### 🆕 Register New Vendor First")
+                    st.info("Add the vendor details below. Once registered, select them from the dropdown above.")
+                    with st.form(f"new_ven_boq_{pid}", clear_on_submit=True):
+                        nv1, nv2 = st.columns(2)
+                        with nv1:
+                            nv_name = st.text_input("Company Name *", key=f"nvn_{pid}")
+                            nv_contact = st.text_input("Contact Person *", key=f"nvc_{pid}")
+                            nv_phone = st.text_input("Phone *", key=f"nvp_{pid}")
+                        with nv2:
+                            nv_email = st.text_input("Email", key=f"nve_{pid}")
+                            nv_address = st.text_area("Address", height=60, key=f"nva_{pid}")
+                            nv_gst = st.text_input("GST Number", key=f"nvg_{pid}")
+                        if st.form_submit_button("✅ Register & Continue", use_container_width=True):
+                            if nv_name and nv_contact and nv_phone:
+                                add_vendor(nv_name, nv_contact, nv_phone, nv_email, nv_address, nv_gst, "Credit - 30 Days")
+                                st.success(f"Vendor **{nv_name}** registered! Now select them from the Vendor dropdown.")
+                                st.rerun()
+                            else:
+                                st.error("Company Name, Contact Person, and Phone are required.")
+                    continue
 
                 mi_filtered = master_items
                 if search:
                     s = search.lower()
                     mi_filtered = [m for m in mi_filtered if
                         s in m.get("item_name", "").lower() or
-                        s in m.get("specification", "").lower() or
-                        s in m.get("vendor", "").lower()]
+                        s in m.get("specification", "").lower()]
+                if ven_filter != "All":
+                    mi_filtered = [m for m in mi_filtered if m.get("vendor", "").lower() == ven_filter.lower()]
                 if cat_filter != "All":
                     mi_filtered = [m for m in mi_filtered if m.get("category") == cat_filter]
                 if subcat_filter != "All":
                     mi_filtered = [m for m in mi_filtered if m.get("sub_category") == subcat_filter]
 
-                mi_opts = {f"{m['item_name']} | {m.get('vendor','')} | {m.get('category','')} > {m.get('sub_category','')} | {m.get('specification','')} — ₹{m.get('revised_price',0) or m.get('price',0)} ({m['item_id']})": m
+                mi_opts = {f"{m['item_name']} | {m.get('vendor','')} | {m.get('category','')} > {m.get('sub_category','')} | {m.get('specification','')} — INR {m.get('revised_price',0) or m.get('price',0)} ({m['item_id']})": m
                            for m in mi_filtered[:200]}
 
                 if not mi_opts:
@@ -167,11 +201,7 @@ def render():
                     with bc1:
                         qty = st.number_input("Quantity *", min_value=1, value=1, step=1, key=f"bq_{pid}")
                     with bc2:
-                        # FIX: Append the item_id to the key. 
-                        # This forces Streamlit to render a fresh widget with the updated default_rate 
-                        # whenever a different item is selected in the dropdown.
-                        dynamic_item_id = sel_mi.get("item_id", "default")
-                        rate = st.number_input("Rate (₹)", min_value=0.0, value=default_rate, step=0.5, key=f"br_{pid}_{dynamic_item_id}")
+                        rate = st.number_input("Rate (₹)", min_value=0.0, value=default_rate, step=0.5, key=f"br_{pid}")
 
                     if st.form_submit_button("➕ Add to BOQ"):
                         if sel_mi and qty > 0:
