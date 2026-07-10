@@ -193,17 +193,19 @@ def render():
                 sel_mi_key = st.selectbox("Select Master Item", list(mi_opts.keys()), key=f"mi_{pid}")
                 sel_mi = mi_opts.get(sel_mi_key, {})
 
-                # Auto-fill rate from master item
+                # Auto-fill rate — use selected item's ID in the key so it resets on change
                 default_rate = float(sel_mi.get("revised_price", 0) or sel_mi.get("price", 0))
+                sel_item_id = sel_mi.get("item_id", "none")
 
-                with st.form(f"boq_{pid}", clear_on_submit=True):
-                    bc1, bc2 = st.columns(2)
-                    with bc1:
-                        qty = st.number_input("Quantity *", min_value=1, value=1, step=1, key=f"bq_{pid}")
-                    with bc2:
-                        rate = st.number_input("Rate (₹)", min_value=0.0, value=default_rate, step=0.5, key=f"br_{pid}")
-
-                    if st.form_submit_button("➕ Add to BOQ"):
+                bc1, bc2, bc3 = st.columns([1, 1, 1])
+                with bc1:
+                    qty = st.number_input("Quantity *", min_value=1, value=1, step=1, key=f"bq_{pid}_{sel_item_id}")
+                with bc2:
+                    rate = st.number_input("Rate (INR)", min_value=0.0, value=default_rate, step=0.5, key=f"br_{pid}_{sel_item_id}")
+                with bc3:
+                    st.markdown("")
+                    st.markdown("")
+                    if st.button("➕ Add to BOQ", key=f"ba_{pid}", use_container_width=True):
                         if sel_mi and qty > 0:
                             add_boq_item(pid, sel_mi["item_id"], sel_mi["item_name"],
                                 sel_mi.get("vendor", ""), sel_mi.get("category", ""),
