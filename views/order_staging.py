@@ -1,5 +1,7 @@
 """Order Staging — review/adjust/place POs grouped by vendor from BOQ."""
 import streamlit as st
+import io
+import zipfile
 import pandas as pd
 from datetime import datetime, timedelta
 from utils.db import (get_staged_orders, update_staged_order_items,
@@ -114,27 +116,78 @@ def render():
                     delete_staged_order(stage_id); st.success("Discarded"); st.rerun()
 
     st.markdown("---")
-    st.markdown("### 🚀 Place All Orders at Once")
-    if st.button("📤 Place All POs", type="primary", use_container_width=True, key="place_all"):
-        placed = 0
-        for order in staged:
-            if order.get("status") == "Sent": continue
-            vn = order.get("vendor_name", "")
-            vm = vendor_by_name.get(vn)
-            vid = vm["vendor_id"] if vm else ""
-            pay = vm.get("payment_terms", PAYMENT_TERMS[0]) if vm else PAYMENT_TERMS[0]
-            li = order.get("line_items", order.get("items", []))
-            po_items = [{"description": i.get("item_name", i.get("description", "")),
-                         "specification": i.get("specification", ""),
-                         "quantity": i["quantity"], "unit": i.get("unit", "Nos"),
-                         "unit_price": i.get("rate", i.get("unit_price", 0))}
-                        for i in li if i.get("quantity", 0) > 0]
-            if po_items:
-                po = create_raw_material_po(project["project_id"], vid, vn, pay,
-                    str(datetime.now().date() + timedelta(days=7)), po_items)
-                update_raw_material_po_status(po["po_id"], "Placed")
-                pdf_key = generate_po_pdf(po, po_items, "Material")
-                if pdf_key: update_po_pdf_key(po["po_id"], pdf_key)
-                update_staged_order_status(order["stage_id"], "Sent")
-                placed += 1
-        st.success(f"Placed **{placed}** POs!"); st.rerun()
+    st.markdown("### 🚀 Bulk Actions")
+
+    bc_all1, bc_all2 = st.columns(2)
+
+    with bc_all1:
+        st.markdown("**Place & Email All POs**")
+        if st.button("📤 Place All POs", type="primary", use_container_width=True, key="place_all"):
+            placed = 0
+            for order in staged:
+                if order.get("status") == "Sent": continue
+                vn = order.get("vendor_name", "")
+                vm = vendor_by_name.get(vn)
+                vid = vm["vendor_id"] if vm else ""
+                pay = vm.get("payment_terms", PAYMENT_TERMS[0]) if vm else PAYMENT_TERMS[0]
+                li = order.get("line_items", order.get("items", []))
+                po_items = [{"description": i.get("item_name", i.get("description", "")),
+                             "specification": i.get("specification", ""),
+                             "quantity": i["quantity"], "unit": i.get("unit", "Nos"),
+                             "unit_price": i.get("rate", i.get("unit_price", 0))}
+                            for i in li if i.get("quantity", 0) > 0]
+                if po_items:
+                    po = create_raw_material_po(project["project_id"], vid, vn, pay,
+                        str(datetime.now().date() + timedelta(days=7)), po_items)
+                    update_raw_material_po_status(po["po_id"], "Placed")
+                    pdf_key = generate_po_pdf(po, po_items, "Material")
+                    if pdf_key: update_po_pdf_key(po["po_id"], pdf_key)
+                    update_staged_order_status(order["stage_id"], "Sent")
+                    placed += 1
+            st.success(f"Placed **{placed}** POs!"); st.rerun()
+
+    with bc_all2:
+        st.markdown("**Download All POs as ZIP**")
+        if st.button("📥 Generate & Download All", use_container_width=True, key="download_all"):
+            zip_buf = io.BytesIO()
+            generated = 0
+            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for order in staged:
+                    if order.get("status") == "Sent": continue
+                    vn = order.get("vendor_name", "Unknown")
+                    vm = vendor_by_name.get(vn)
+                    vid = vm["vendor_id"] if vm else ""
+                    pay = vm.get("payment_terms", PAYMENT_TERMS[0]) if vm else PAYMENT_TERMS[0]
+                    li = order.get("line_items", order.get("items", []))
+                    po_items = [{"description": i.get("item_name", i.get("description", "")),
+                                 "specification": i.get("specification", ""),
+                                 "quantity": i["quantity"], "unit": i.get("unit", "Nos"),
+                                 "unit_price": i.get("rate", i.get("unit_price", 0))}
+                                for i in li if i.get("quantity", 0) > 0]
+                    if po_items:
+                        # Create PO as Draft (not Placed — no email sent)
+                        po = create_raw_material_po(project["project_id"], vid, vn, pay,
+                            str(datetime.now().date() + timedelta(days=7)), po_items)
+                        pdf_key = generate_po_pdf(po, po_items, "Material")
+                        if pdf_key:
+                            update_po_pdf_key(po["po_id"], pdf_key)
+                            pdf_bytes = get_po_pdf_download(pdf_key)
+                            if pdf_bytes:
+                                safe_name = vn.replace("/", "-").replace("\\", "-")[:30]
+                                zf.writestr(f"{po['po_id']}_{safe_name}.pdf", pdf_bytes)
+                                generated += 1
+                        update_staged_order_status(order["stage_id"], "Sent")
+
+            if generated > 0:
+                zip_buf.seek(0)
+                st.download_button(
+                    f"⬇️ Download {generated} PO PDFs (ZIP)",
+                    zip_buf.getvalue(),
+                    f"POs_{project['name']}_{datetime.now().strftime('%Y%m%d')}.zip",
+                    "application/zip",
+                    key="zip_download",
+                    use_container_width=True,
+                )
+                st.success(f"Generated **{generated}** PO PDFs as drafts. Download the ZIP above.")
+            else:
+                st.warning("No POs to generate.")
