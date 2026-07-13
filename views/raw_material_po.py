@@ -9,7 +9,7 @@ from utils.db import (
     get_raw_material_po_items, update_po_item_receipt,
     update_raw_material_po_status, place_po_via_sqs,
     delete_raw_material_po,
-    receive_to_inventory,
+    receive_to_inventory, deduct_from_inventory,
     generate_po_pdf, update_po_pdf_key, get_po_pdf_download,
     upload_attachment, list_attachments, get_attachment,
 )
@@ -198,6 +198,39 @@ def _render_po_details(po):
                             else:
                                 st.success(f"Received {recv_now}. Total: {new_total}/{ordered}")
                             st.rerun()
+
+                # Correction: edit the total received directly (works even when
+                # remaining is 0 — e.g. after reopening a completed PO)
+                if not is_item_done:
+                    with st.expander("✏️ Adjust total received", expanded=(remaining <= 0)):
+                        with st.form(key=f"adj_form_{po['po_id']}_{item['item_id']}"):
+                            ac1, ac2 = st.columns([2, 1])
+                            with ac1:
+                                corrected = st.number_input(
+                                    f"Corrected total (0–{ordered})", min_value=0.0,
+                                    max_value=ordered, value=already_received, step=1.0,
+                                    key=f"adj_{po['po_id']}_{item['item_id']}")
+                            with ac2:
+                                adj_done = st.checkbox("Close item", key=f"adjd_{po['po_id']}_{item['item_id']}")
+                            if st.form_submit_button("💾 Save Correction"):
+                                delta = corrected - already_received
+                                update_po_item_receipt(po["po_id"], item["item_id"], corrected, adj_done)
+                                if delta > 0:
+                                    receive_to_inventory(
+                                        item.get("description", ""), item.get("category", "Received"),
+                                        item.get("sub_category", "PO Receipt"), item.get("specification", ""),
+                                        delta, item.get("unit", "Kg"), "Main Store", item.get("unit_price", 0))
+                                elif delta < 0:
+                                    deduct_from_inventory(
+                                        item.get("description", ""), item.get("category", "Received"),
+                                        item.get("specification", ""), -delta)
+                                if delta > 0:
+                                    st.success(f"Corrected to {corrected}/{ordered} — added {delta} to inventory.")
+                                elif delta < 0:
+                                    st.success(f"Corrected to {corrected}/{ordered} — removed {-delta} from inventory.")
+                                else:
+                                    st.success(f"Saved: {corrected}/{ordered}.")
+                                st.rerun()
 
                 st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
 

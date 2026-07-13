@@ -524,6 +524,26 @@ def _render_spo(po):
                                     st.success("Updated!")
                                 st.rerun()
 
+                    # Correction: edit the total received directly (works even
+                    # when remaining is 0 — e.g. after reopening a completed SPO)
+                    with st.expander("✏️ Adjust total received", expanded=(remaining <= 0)):
+                        with st.form(key=f"sadj_form_{po['po_id']}_{item['item_id']}"):
+                            corrected = st.number_input(
+                                f"Corrected total (0–{ordered})", min_value=0.0,
+                                max_value=ordered, value=already, step=1.0,
+                                key=f"sadj_{po['po_id']}_{item['item_id']}")
+                            adj_done = st.checkbox("Close item", key=f"sadjd_{po['po_id']}_{item['item_id']}")
+                            if st.form_submit_button("💾 Save Correction"):
+                                update_service_po_item(po["po_id"], item["item_id"],
+                                    corrected, adj_done,
+                                    item.get("finishing_status", "Pending"),
+                                    item.get("finishing_comment", ""),
+                                    float(item.get("scrap_received", 0)),
+                                    item.get("scrap_usable", False),
+                                    item.get("scrap_notes", ""))
+                                st.success(f"Saved: {corrected}/{ordered}.")
+                                st.rerun()
+
                 st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
 
             if all_received and po_items:
