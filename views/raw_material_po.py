@@ -124,6 +124,33 @@ def _render_po_details(po):
                     st.success("PO reopened. All items are now editable.")
                     st.rerun()
         else:
+            # ─── Bulk: receive everything in one click ────────
+            pending = [i for i in po_items if not i.get("received", False)]
+            if pending:
+                ba1, ba2 = st.columns([3, 1])
+                with ba1:
+                    confirm_all = st.checkbox(
+                        f"All {len(pending)} pending item(s) received in full",
+                        key=f"rall_ck_{po['po_id']}")
+                with ba2:
+                    if st.button("📥 Receive ALL", key=f"rall_{po['po_id']}",
+                                 type="primary", disabled=not confirm_all,
+                                 use_container_width=True):
+                        for item in pending:
+                            ordered_q = float(item.get("quantity", 0))
+                            got = float(item.get("quantity_received", 0))
+                            delta = ordered_q - got
+                            update_po_item_receipt(po["po_id"], item["item_id"], ordered_q, True)
+                            if delta > 0:
+                                receive_to_inventory(
+                                    item.get("description", ""), item.get("category", "Received"),
+                                    item.get("sub_category", "PO Receipt"), item.get("specification", ""),
+                                    delta, item.get("unit", "Kg"), "Main Store", item.get("unit_price", 0))
+                        update_raw_material_po_status(po["po_id"], "Complete")
+                        st.success("All items received — PO marked Complete.")
+                        st.rerun()
+                st.markdown("<hr style='margin:4px 0;border-color:#e2e8f0'>", unsafe_allow_html=True)
+
             all_received = True
             for item in po_items:
                 ordered = float(item.get("quantity", 0))

@@ -441,6 +441,32 @@ def _render_spo(po):
                     st.success("Reopened! All items are now editable.")
                     st.rerun()
         else:
+            # ─── Bulk: receive everything in one click ────────
+            pending = [i for i in po_items if not i.get("received", False)]
+            if pending:
+                ba1, ba2 = st.columns([3, 1])
+                with ba1:
+                    confirm_all = st.checkbox(
+                        f"All {len(pending)} pending item(s) received in full",
+                        key=f"srall_ck_{po['po_id']}")
+                with ba2:
+                    if st.button("📥 Receive ALL", key=f"srall_{po['po_id']}",
+                                 type="primary", disabled=not confirm_all,
+                                 use_container_width=True):
+                        for item in pending:
+                            ordered_q = float(item.get("quantity", 0))
+                            update_service_po_item(po["po_id"], item["item_id"],
+                                ordered_q, True,
+                                item.get("finishing_status", "Complete"),
+                                item.get("finishing_comment", ""),
+                                float(item.get("scrap_received", 0)),
+                                item.get("scrap_usable", False),
+                                item.get("scrap_notes", ""))
+                        update_service_po_status(po["po_id"], "Complete")
+                        st.success("All items received — Service PO marked Complete.")
+                        st.rerun()
+                st.markdown("<hr style='margin:4px 0;border-color:#e2e8f0'>", unsafe_allow_html=True)
+
             all_received = True
             for item in po_items:
                 ordered = float(item.get("quantity", 0))
