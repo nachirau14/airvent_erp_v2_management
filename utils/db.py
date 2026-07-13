@@ -109,10 +109,11 @@ def _from_decimal(obj):
 def _scan_all(table_name):
     db = get_dynamodb()
     table = db.Table(table_name)
-    resp = table.scan()
+    # ConsistentRead so rows written milliseconds ago are always visible
+    resp = table.scan(ConsistentRead=True)
     items = resp.get("Items", [])
     while "LastEvaluatedKey" in resp:
-        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
+        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"], ConsistentRead=True)
         items.extend(resp.get("Items", []))
     return [_from_decimal(i) for i in items]
 
@@ -127,6 +128,14 @@ CACHE_TTL = 60  # seconds — data is reloaded from DynamoDB at most every 60s
 # within the same Streamlit script run (which happens A LOT — pages call
 # get_all_vendors() 2-3 times each). Cleared automatically on each new run.
 _RUN_STORE = {}
+
+def clear_run_store():
+    """Reset the per-run memo. MUST be called at the top of app.py on every
+    script run — otherwise this dict outlives the rerun (modules persist for
+    the whole Streamlit process) and serves stale data indefinitely,
+    including writes made by the OTHER app (management vs production)."""
+    global _RUN_STORE
+    _RUN_STORE = {}
 
 def _get_from_run_store(key, loader):
     """Return data from per-run memory if available, else call loader and store."""
