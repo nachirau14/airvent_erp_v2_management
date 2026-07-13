@@ -1591,13 +1591,17 @@ def get_all_issued_material():
 
 @_write_and_clear
 def return_issued_material(record, return_qty, returned_by, reason=""):
-    """Return part/all of an issued record back to raw inventory.
-    Adds qty back via receive_to_inventory (aggregating), then decrements
-    the issued record — deleting it entirely if fully returned."""
-    receive_to_inventory(
-        record.get("item_name", ""), record.get("category", "Returned"),
-        record.get("sub_category", ""), record.get("specification", ""),
-        return_qty, record.get("unit", "Nos"))
+    """Return part/all of an issued record to the SCRAP STORE.
+    Creates a scrap entry (visible in Scrap Store tabs and searchable when
+    building Service POs), then decrements the issued record — deleting it
+    entirely if fully returned."""
+    add_scrap_item(
+        record.get("item_name", ""),
+        record.get("category", "Returned"),
+        record.get("specification", ""),
+        return_qty, record.get("unit", "Nos"),
+        source_po=record.get("issue_id", record.get("project_id", "")),
+        notes=f"Returned by {returned_by}" + (f": {reason}" if reason else ""))
     db = get_dynamodb()
     table = db.Table(TABLES["issued_material"])
     remaining = float(record.get("quantity", 0)) - float(return_qty)
